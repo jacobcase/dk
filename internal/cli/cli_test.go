@@ -558,7 +558,7 @@ func TestGuideIsPlainTextRegardlessOfFormat(t *testing.T) {
 		}
 		// The guide is documentation, not a result set, so it must not be
 		// wrapped in the requested encoding.
-		for _, want := range []string{"EXIT CODES", "auth_required", "dk auth login", "PARAMETRIC FILTERING", "--param"} {
+		for _, want := range []string{"EXIT CODES", "auth_required", "dk auth login", "PARAMETRIC FILTERING", "--param", "DATASHEETS AND DOCUMENTS", "dk docs"} {
 			if !strings.Contains(res.Stdout, want) {
 				t.Errorf("guide --output %s missing %q", format, want)
 			}

@@ -60,6 +60,18 @@ parameter ids are category-scoped. `resolveParamSpecs` derives that category fro
 the parameters themselves and rejects specs that span two categories, since the
 API cannot express it.
 
+## Documents
+
+`Product.DatasheetUrl` carries the primary datasheet and rides along with every
+search result, so `dk docs` (the `/media` endpoint) is only for the rest:
+additional datasheets, manuals, reference designs, CAD models, PCNs.
+
+`--download` treats every filename as hostile — it comes from a remote URL.
+`sanitizeFilename` reduces it to a single path element with no separators and no
+leading dots; `TestDocumentFilenameIsContained` is the guard. Downloads are
+atomic (temp file + rename), size-capped, and carry no `Authorization` header,
+since the files live on a CDN rather than the API.
+
 ## Auth model
 
 Product Information accepts a `client_credentials` token. MyLists requires an

@@ -110,6 +110,7 @@ returns your account-specific pricing (`MyPricing`) instead of list pricing.
 dk search <keywords...>       search the catalog
 dk filters <keywords...>      discover the filters available for a search
 dk product <part-number>      full detail for one part
+dk docs <part-number>         list or download datasheets and documents
 dk categories [id]            browse the category taxonomy
 dk manufacturers              list manufacturer ids
 
@@ -230,6 +231,50 @@ The same physical part has a different DigiKey part number per packaging option
 ```
 dk product 1276-1000-1-ND --variations
 ```
+
+## Datasheets and documents
+
+The primary datasheet URL comes back with every search and product result as
+`datasheet_url` — no extra call. For everything else DigiKey attaches to a part:
+
+```
+$ dk docs STM32G031K8T6
+TYPE              TITLE                    URL
+Datasheets        STM32G031x4/x6/x8        https://mm.digikey.com/.../stm32g031k8.pdf
+Manuals           RM0444 Reference Manual  https://mm.digikey.com/.../rm0444.pdf
+EDA / CAD Models  Ultra Librarian          https://app.ultralibrarian.com/...
+Product Photos    LQFP-32                  https://mm.digikey.com/...
+```
+
+To get the PDFs on disk:
+
+```
+dk docs STM32G031K8T6 --type datasheet --download ./datasheets
+```
+
+Downloads are written atomically, refuse to clobber existing files without
+`--overwrite`, and are capped at 128 MB each. A document that fails to download
+gets an `error` field in the JSON rather than aborting the rest; the command
+exits non-zero only if nothing at all was downloaded. No bearer token is sent to
+the CDN hosting the files.
+
+## What this is good at (and what it isn't)
+
+DigiKey's parametric data describes **components** well and **boards** poorly.
+That shapes how you should drive it:
+
+- **Discrete components** — resistors, capacitors, connectors, terminals, ICs.
+  Parametric filtering works well; attributes like stud size, tolerance,
+  dielectric, pin count, and supply voltage are real, filterable parameters.
+- **Dev boards and modules** — Feather, QT Py, Pico, sensor breakouts. GPIO
+  count, connector type (USB-C vs micro-B), and ecosystem branding (STEMMA QT,
+  Qwiic, Grove) are generally *not* parameters. They live in the product title
+  and `detailed_description`. Lead with keywords, narrow with
+  `--manufacturer Adafruit`, and verify with `--full`.
+
+For board-level questions dk is a **verification** tool more than a discovery
+tool: bring candidate part families, and use dk to confirm they exist, are in
+stock, and cost what you expect. `dk guide` spells this out for agent callers.
 
 ## Output
 

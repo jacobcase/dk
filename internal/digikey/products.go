@@ -431,6 +431,44 @@ func (c *Client) Substitutions(ctx context.Context, partNumber string) (*Product
 	return &out, nil
 }
 
+// MediaLink is one document or asset attached to a product: a datasheet, a
+// manual, a CAD model, a photo, a PCN, or a video.
+type MediaLink struct {
+	// MediaType is DigiKey's grouping, e.g. "Datasheets", "Manuals",
+	// "EDA / CAD Models", "Product Photos", "PCNs", "Videos".
+	MediaType  string `json:"MediaType"`
+	Title      string `json:"Title"`
+	URL        string `json:"Url"`
+	SmallPhoto string `json:"SmallPhoto"`
+	Thumbnail  string `json:"Thumbnail"`
+}
+
+// MediaResponse is the /search/{productNumber}/media result.
+type MediaResponse struct {
+	MediaLinks []MediaLink `json:"MediaLinks"`
+}
+
+// Media returns every document and asset DigiKey lists for a product.
+//
+// Product.DatasheetURL already carries the primary datasheet; this endpoint is
+// for everything else (additional datasheets, manuals, reference designs, CAD
+// models) and costs a separate call.
+func (c *Client) Media(ctx context.Context, partNumber string) ([]MediaLink, error) {
+	if strings.TrimSpace(partNumber) == "" {
+		return nil, fmt.Errorf("product number is required")
+	}
+	var out MediaResponse
+	err := c.do(ctx, request{
+		method: "GET",
+		path:   productsBasePath + "/search/" + url.PathEscape(partNumber) + "/media",
+		out:    &out,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.MediaLinks, nil
+}
+
 // Manufacturers returns the manufacturer list, whose ids feed
 // FilterOptionsRequest.ManufacturerFilter.
 func (c *Client) Manufacturers(ctx context.Context) ([]NamedID, error) {

@@ -585,3 +585,32 @@ func TestSubstitutionsDecodes(t *testing.T) {
 		t.Errorf("UnitPrice = %q, want the preformatted string", resp.ProductSubstitutes[0].UnitPrice)
 	}
 }
+
+func TestMediaDecodes(t *testing.T) {
+	client, cap := newTestClient(t, http.StatusOK, `{"MediaLinks":[
+	  {"MediaType":"Datasheets","Title":"GRM Series","Url":"https://mm.digikey.com/GRM.pdf"},
+	  {"MediaType":"Product Photos","Title":"0603","Url":"https://mm.digikey.com/0603.jpg",
+	   "Thumbnail":"https://mm.digikey.com/0603_t.jpg"}
+	]}`)
+
+	links, err := client.Media(context.Background(), "490-1532-1-ND")
+	if err != nil {
+		t.Fatalf("Media() error = %v", err)
+	}
+	if len(links) != 2 {
+		t.Fatalf("got %d media links, want 2", len(links))
+	}
+	if links[0].MediaType != "Datasheets" || links[0].URL != "https://mm.digikey.com/GRM.pdf" {
+		t.Errorf("first link = %+v", links[0])
+	}
+	if cap.Path != "/products/v4/search/490-1532-1-ND/media" {
+		t.Errorf("path = %q", cap.Path)
+	}
+}
+
+func TestMediaRejectsEmptyPartNumber(t *testing.T) {
+	client, _ := newTestClient(t, http.StatusOK, `{}`)
+	if _, err := client.Media(context.Background(), "  "); err == nil {
+		t.Error("Media(\"\") error = nil, want a validation error")
+	}
+}

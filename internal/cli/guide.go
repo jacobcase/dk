@@ -125,6 +125,21 @@ PRODUCT DETAIL
   Accepts a DigiKey or manufacturer part number. In JSON mode the full view
   (parameters, price breaks, variations) is always returned regardless of flags.
 
+DATASHEETS AND DOCUMENTS
+  The primary datasheet URL is already in search and product output as
+  datasheet_url — no extra call needed. For everything else:
+
+    dk docs <part-number> [--type datasheet] [--download DIR] [--overwrite]
+
+  Lists datasheets, manuals, reference designs, CAD models, photos, PCNs, and
+  videos, each with type, title, and url. --download writes them to disk and
+  reports the path per document; a document that fails to download gets an
+  "error" field rather than aborting the rest.
+
+  To read a datasheet, fetching the url directly is usually enough. Use
+  --download when you want the PDF on disk (large datasheets are easier to
+  handle as a file than through a fetch tool).
+
 LISTS
   dk list ls                                  show all lists
   dk list create <name> [--tag T] [--auto-rename]
@@ -148,6 +163,38 @@ LISTS
   resolve. Without it, DigiKey silently accepts unknown part numbers and marks
   the line unmatched. Always check "matched" in "dk list show" output, or the
   "unmatched_parts" count.
+
+CHOOSING A SEARCH STRATEGY
+  DigiKey's parametric data describes COMPONENTS well and BOARDS poorly. Which
+  strategy works depends on what is being asked for:
+
+  Discrete components (resistors, capacitors, connectors, terminals, ICs)
+    Parametric filtering works well. Attributes like stud size, tolerance,
+    dielectric, pin count, and supply voltage are real parameters.
+      dk filters "ring terminal heat shrink"
+      dk search "ring terminal" --param "Stud/Tab Size=#10" --param "Insulation=Heat Shrink"
+
+  Dev boards and modules (Feather, QT Py, Pico, breakout sensor boards)
+    Parametric coverage is thin: GPIO count, connector type (USB-C vs micro-B),
+    and ecosystem branding (STEMMA QT, Qwiic, Grove) are usually NOT parameters.
+    They live in the title and detailed_description. So:
+      - lead with keywords, including the branding term itself
+      - use --manufacturer (Adafruit, SparkFun, Seeed) to narrow hard
+      - use --full and read detailed_description and parameters to verify
+      - expect to supply candidate part families from your own knowledge, then
+        use dk to confirm they exist, are in stock, and cost what you expect
+      Example: "STEMMA QT DC voltage sensor" is a keyword search plus knowing
+      that INA219/INA260/ADS1115 breakouts exist; dk verifies, it does not
+      discover.
+
+  Mixed requirements
+    Split them. Filter parametrically on what DigiKey models, keyword-match the
+    rest, then verify each candidate with dk product --full or its datasheet.
+
+  When a search returns thousands of matches, run dk filters before guessing at
+  more keywords: the product_count on each value shows what will actually narrow
+  it. When a search returns nothing, the keywords are likely over-specified —
+  drop the branding or packaging terms first.
 
 RECOMMENDED AGENT WORKFLOW
   1. dk auth status --output json                  confirm .user_logged_in
