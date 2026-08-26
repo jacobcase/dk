@@ -57,6 +57,7 @@ func newSearchCommand(app *App) *cobra.Command {
 		minQty        int
 		manufacturers []string
 		categories    []string
+		params        []string
 		rohs          bool
 		hasDatasheet  bool
 		noMarketplace bool
@@ -82,6 +83,21 @@ Keywords are joined with spaces, so quoting is optional:
 The DKPN column is the DigiKey part number to pass to "dk list add". Note that
 each packaging option (cut tape, tape & reel, digi-reel) has its own DKPN; run
 "dk product <part> --variations" to see them all.
+
+Parametric filtering uses --param, with names and values as DigiKey spells them:
+
+  dk search "0603 ceramic capacitor" --param "Capacitance=0.1 µF" --param "Tolerance=±10%"
+
+Several values on one parameter mean "any of these"; separate parameters are
+combined with AND:
+
+  dk search "0603 resistor" --param "Resistance=10 kOhms,4.7 kOhms"
+
+Run "dk filters <keywords>" first to see which parameters exist for a query and
+what values they accept. Parameter names and values are matched case-insensitively,
+and a unique prefix or substring is enough. Parameter ids are category-scoped, so
+--param implies a category; it is inferred from the keywords unless you pass
+--category.
 
 Uses application-level (2-legged) auth, so no "dk auth login" is needed.`,
 		Args: cobra.MinimumNArgs(1),
@@ -130,6 +146,33 @@ Uses application-level (2-legged) auth, so no "dk auth login" is needed.`,
 					return err
 				}
 				filters.CategoryFilter = ids
+			}
+
+			if len(params) > 0 {
+				// Parametric filtering needs a facet lookup: parameter and value
+				// ids are only knowable from a search response. One extra call
+				// buys name-based filtering instead of opaque numeric ids.
+				categoryHint := ""
+				if len(categories) > 0 {
+					categoryHint = categories[0]
+				}
+				parametric, categoryID, err := resolveParams(ctx, client, keywords, categoryHint, inStock, params)
+				if err != nil {
+					return err
+				}
+				if categoryID == 0 {
+					return usageErrorf("could not determine which category these parameters belong to; " +
+						"pass --category (see `dk filters` for the categories matching your keywords)")
+				}
+				filters.ParameterFilterRequest = &digikey.ParameterFilterRequest{
+					CategoryFilter:   &digikey.FilterID{ID: strconv.Itoa(categoryID)},
+					ParameterFilters: parametric,
+				}
+				// DigiKey ignores parametric filters unless the search is scoped
+				// to the owning category, so make that scoping explicit.
+				if len(filters.CategoryFilter) == 0 {
+					filters.CategoryFilter = []digikey.FilterID{{ID: strconv.Itoa(categoryID)}}
+				}
 			}
 
 			req := digikey.KeywordRequest{
@@ -215,6 +258,10 @@ Uses application-level (2-legged) auth, so no "dk auth login" is needed.`,
 	f.IntVar(&minQty, "min-qty", 0, "only products with at least this many in stock")
 	f.StringSliceVar(&manufacturers, "manufacturer", nil, "restrict to manufacturers by name or id (repeatable)")
 	f.StringSliceVar(&categories, "category", nil, "restrict to categories by name or id (repeatable)")
+	// StringArray, not StringSlice: values like "1 µF, 10%" contain commas that
+	// must not be split into separate flag values.
+	f.StringArrayVar(&params, "param", nil,
+		"parametric filter as NAME=VALUE or NAME=VALUE,VALUE (repeatable); run `dk filters` to discover names and values")
 	f.BoolVar(&rohs, "rohs", false, "only RoHS compliant products")
 	f.BoolVar(&hasDatasheet, "has-datasheet", false, "only products with a datasheet")
 	f.BoolVar(&noMarketplace, "no-marketplace", false, "exclude Marketplace items, which ship separately from the supplier")

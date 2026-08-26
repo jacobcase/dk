@@ -197,6 +197,7 @@ Run "dk guide" for a condensed reference aimed at automated callers.`,
 
 	root.AddCommand(
 		newSearchCommand(app),
+		newFiltersCommand(app),
 		newProductCommand(app),
 		newCategoriesCommand(app),
 		newManufacturersCommand(app),

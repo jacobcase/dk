@@ -254,12 +254,95 @@ type IsoSearchLocale struct {
 	Currency string `json:"Currency"`
 }
 
+// BaseFilter is a facet value with the number of products behind it. DigiKey
+// uses it for the non-parametric facets (manufacturer, packaging, status,
+// series), where Value is the display name and Id feeds the matching filter.
+type BaseFilter struct {
+	ID           int    `json:"Id"`
+	Value        string `json:"Value"`
+	ProductCount int    `json:"ProductCount"`
+}
+
+// FilterValue is one selectable value of a parametric filter.
+//
+// RangeFilterType is empty for ordinary enumerated values. For numeric
+// parameters DigiKey also returns synthetic Min/Max/Range entries whose ValueId
+// encodes the bound rather than a discrete choice.
+type FilterValue struct {
+	ProductCount    int    `json:"ProductCount"`
+	ValueID         string `json:"ValueId"`
+	ValueName       string `json:"ValueName"`
+	RangeFilterType string `json:"RangeFilterType"`
+}
+
+// ParameterFilterOptions describes one parameter that can be filtered on, along
+// with the values available in the current result set. Parameter ids are scoped
+// to a category, which is why Category travels with them.
+type ParameterFilterOptions struct {
+	Category      BaseFilter    `json:"Category"`
+	ParameterType string        `json:"ParameterType"`
+	ParameterID   int           `json:"ParameterId"`
+	ParameterName string        `json:"ParameterName"`
+	FilterValues  []FilterValue `json:"FilterValues"`
+}
+
+// TopCategoryNode identifies a category in the TopCategories facet.
+type TopCategoryNode struct {
+	ID           int    `json:"Id"`
+	Name         string `json:"Name"`
+	ProductCount int    `json:"ProductCount"`
+}
+
+// TopCategory is a category DigiKey considers relevant to the search, scored by
+// how well it matches. It is how a keyword query is turned into the category
+// that parametric filtering requires.
+type TopCategory struct {
+	RootCategory TopCategoryNode `json:"RootCategory"`
+	Category     TopCategoryNode `json:"Category"`
+	Score        float64         `json:"Score"`
+}
+
+// FilterOptions is the facet set DigiKey returns alongside search results: the
+// filters that would actually narrow *this* result set.
+//
+// There is no endpoint that lists the filters for a category in the abstract.
+// Running a search and reading these facets is the only discovery mechanism the
+// v4 API offers.
+type FilterOptions struct {
+	Manufacturers     []BaseFilter             `json:"Manufacturers"`
+	Packaging         []BaseFilter             `json:"Packaging"`
+	Status            []BaseFilter             `json:"Status"`
+	Series            []BaseFilter             `json:"Series"`
+	ParametricFilters []ParameterFilterOptions `json:"ParametricFilters"`
+	TopCategories     []TopCategory            `json:"TopCategories"`
+}
+
 // KeywordResponse is the /search/keyword result.
 type KeywordResponse struct {
 	Products         []Product       `json:"Products"`
 	ProductsCount    int             `json:"ProductsCount"`
 	ExactMatches     []Product       `json:"ExactMatches"`
+	FilterOptions    FilterOptions   `json:"FilterOptions"`
 	SearchLocaleUsed IsoSearchLocale `json:"SearchLocaleUsed"`
+}
+
+// BestCategory returns the highest-scoring category DigiKey associated with the
+// search, which is the one parametric filters should be scoped to. It reports
+// false when the response carried no category facet.
+func (f FilterOptions) BestCategory() (TopCategoryNode, bool) {
+	best := -1
+	for i, c := range f.TopCategories {
+		if c.Category.ID == 0 {
+			continue
+		}
+		if best < 0 || c.Score > f.TopCategories[best].Score {
+			best = i
+		}
+	}
+	if best < 0 {
+		return TopCategoryNode{}, false
+	}
+	return f.TopCategories[best].Category, true
 }
 
 // ProductDetails is the /search/{productNumber}/productdetails result.

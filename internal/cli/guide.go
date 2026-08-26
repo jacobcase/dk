@@ -78,6 +78,48 @@ SEARCH
   different number for cut tape vs. tape & reel. Use
   "dk product <part> --variations" to see all of them before committing to one.
 
+PARAMETRIC FILTERING
+  DigiKey has no endpoint listing the filters for a category. Filters are
+  discovered from a search response, so narrowing is a two-step loop:
+
+    dk filters <keywords...>                      what can I filter on?
+      [--parameter NAME|ID]                       every value of one parameter
+      [--category NAME|ID] [--in-stock]
+      [--values N | --all-values]                 table value cap (JSON has all)
+
+    dk search <keywords...> --param "NAME=VALUE"  apply it
+
+  Example loop:
+    dk filters "0603 ceramic capacitor" --output json
+    dk filters "0603 ceramic capacitor" --parameter Capacitance --output json
+    dk search "0603 ceramic capacitor" \
+      --param "Capacitance=0.1 µF" --param "Tolerance=±10%" --in-stock
+
+  filters JSON: {"query","total_matches","category":{"id","name"},
+                 "top_categories":[...],"parameters":[{"parameter_id",
+                 "parameter_name","parameter_type","category_id","value_count",
+                 "values":[{"value_id","value_name","product_count",
+                 "range_type"}]}],"manufacturers","packaging","status","series"}
+
+  Rules that matter:
+  - product_count on each value tells you how much that choice narrows the
+    search. Use it to pick a filter that actually helps.
+  - --param matches names case-insensitively; a unique substring is enough. A
+    raw value_id from "dk filters" also works.
+  - Several values on ONE parameter are OR-ed:  --param "Resistance=10 kOhms,4.7 kOhms"
+    Separate --param flags are AND-ed.
+  - If a value itself contains a comma (e.g. "C0G, NP0"), repeat the flag
+    instead of comma-joining: --param "X=C0G, NP0" works, and repeating
+    --param for the same name merges the values.
+  - Parameter ids are scoped to a category, so --param implies one. It is
+    inferred from the keywords; pass --category if the inference is wrong or if
+    dk reports that the parameters span more than one category.
+  - A wrong parameter or value name exits 2 and the error lists what IS
+    available, so you can correct without re-running "dk filters".
+  - values whose range_type is Min/Max/Range are synthetic bounds DigiKey adds
+    to numeric parameters, not discrete choices.
+  - --param costs one extra API call for discovery.
+
 PRODUCT DETAIL
   dk product <part-number> [--variations] [--parameters] [--substitutes]
   Accepts a DigiKey or manufacturer part number. In JSON mode the full view
@@ -110,6 +152,9 @@ LISTS
 RECOMMENDED AGENT WORKFLOW
   1. dk auth status --output json                  confirm .user_logged_in
   2. dk search "<part description>" --in-stock --limit 5 --output json
+     If too many matches, narrow parametrically:
+       dk filters "<part description>" --output json
+       dk search "<part description>" --param "<name>=<value>" --in-stock
   3. Pick a part; confirm packaging with dk product <dkpn> --variations
   4. dk list create "<project name>"               once per project
   5. dk list add "<project>" <dkpn>:<qty> --ref <designators> --verify

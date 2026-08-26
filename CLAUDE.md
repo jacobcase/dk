@@ -43,6 +43,22 @@ Break these and the CLI stops being safe to drive from a program:
   hatch for the untouched payload.
 - **List commands accept a name or an id.** GUIDs are hostile to both humans and
   agents. `ResolveList` handles it; an ambiguous name is an error, never a guess.
+- **Filters are named, not numbered.** `--param "Capacitance=0.1 µF"` resolves
+  through the facets rather than making callers pass opaque ids. When a name
+  fails to resolve, the error lists what *is* available — that is what lets an
+  agent self-correct in one round trip instead of two.
+
+## Parametric filtering
+
+There is no endpoint that lists a category's filters. `KeywordResponse.FilterOptions`
+carries them as facets for the current result set, which is why `dk filters` runs
+a real search (with `Limit: 1` — facets come back regardless of page size) and
+why `dk search --param` costs a second call to resolve names to ids.
+
+DigiKey only honors `ParameterFilterRequest` alongside a `CategoryFilter`, and
+parameter ids are category-scoped. `resolveParamSpecs` derives that category from
+the parameters themselves and rejects specs that span two categories, since the
+API cannot express it.
 
 ## Auth model
 

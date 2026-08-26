@@ -108,6 +108,7 @@ returns your account-specific pricing (`MyPricing`) instead of list pricing.
 
 ```
 dk search <keywords...>       search the catalog
+dk filters <keywords...>      discover the filters available for a search
 dk product <part-number>      full detail for one part
 dk categories [id]            browse the category taxonomy
 dk manufacturers              list manufacturer ids
@@ -162,6 +163,63 @@ cat bom.json | dk list add "Bench PSU rev A" --from-json -
 complaint and simply marks the line unmatched. `--verify` checks each part
 against the catalog first and skips the ones that do not resolve. Either way,
 watch the `MATCHED` column in `dk list show` (or `unmatched_parts` in JSON).
+
+## Parametric filtering
+
+DigiKey has **no endpoint that lists the filters for a category**. Filters come
+back as facets on a search response — the parameters that would narrow *that*
+result set. So narrowing is a two-step loop.
+
+**1. Discover what you can filter on:**
+
+```
+$ dk filters "0603 ceramic capacitor"
+PARAM ID  PARAMETER                TYPE           VALUES
+2049      Capacitance              UnitOfMeasure  0.1 µF (1500), 1 µF (900), 10 µF (400), (+38 more)
+1291      Tolerance                String         ±10% (2000), ±5% (1200)
+2079      Temperature Coefficient  String         X7R (1800), C0G, NP0 (700)
+
+Category: Ceramic Capacitors (id 60)
+4210 products match "0603 ceramic capacitor".
+```
+
+The product counts show how much each choice would narrow things.
+
+**2. Drill into one parameter** (the overview caps each value list):
+
+```
+dk filters "0603 ceramic capacitor" --parameter Capacitance
+dk filters "0603 ceramic capacitor" --all-values --output json
+```
+
+**3. Apply the filters:**
+
+```
+dk search "0603 ceramic capacitor" \
+  --param "Capacitance=0.1 µF" --param "Tolerance=±10%" --in-stock
+```
+
+Details worth knowing:
+
+- **Names, not ids.** `--param` matches parameter and value names
+  case-insensitively, and a unique substring is enough. A raw `value_id` from
+  `dk filters` works too.
+- **OR within a parameter, AND across them.**
+  `--param "Resistance=10 kOhms,4.7 kOhms"` means either resistance;
+  a second `--param` further narrows.
+- **Values containing a comma** (e.g. `C0G, NP0`) would be split by the
+  comma-join syntax. Repeat the flag instead — repeated `--param` for the same
+  parameter merges its values.
+- **Categories are implied.** Parameter ids are scoped to a category, so
+  `--param` needs one. It is inferred from your keywords; pass `--category` if
+  the inference is wrong or if dk reports that your parameters span more than
+  one category.
+- **Wrong guesses are recoverable.** An unknown parameter or value exits 2 and
+  the error lists what *is* available, so a caller can correct itself without
+  re-running `dk filters`.
+- `--param` costs one extra API call, for discovery.
+- Values with `range_type` of `Min`/`Max`/`Range` are synthetic bounds DigiKey
+  attaches to numeric parameters, not discrete choices.
 
 ### Packaging variations matter
 
