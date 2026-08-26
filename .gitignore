@@ -1,0 +1,8 @@
+bin/
+coverage.out
+coverage.html
+
+# Never commit real DigiKey credentials or cached tokens.
+config.json
+token.json
+.env

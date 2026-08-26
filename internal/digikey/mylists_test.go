@@ -1,0 +1,506 @@
+package digikey
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+// routedClient serves a path->response table, so multi-call flows (resolve a
+// list, then act on it) can be exercised end to end.
+type routedClient struct {
+	*Client
+	requests []*capture
+}
+
+type route struct {
+	status int
+	body   string
+}
+
+func newRoutedClient(t *testing.T, routes map[string]route) *routedClient {
+	t.Helper()
+	rc := &routedClient{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		rc.requests = append(rc.requests, &capture{
+			Method: r.Method, Path: r.URL.Path, RawURI: r.RequestURI,
+			Query: r.URL.RawQuery, Headers: r.Header.Clone(), Body: b,
+		})
+
+		key := r.Method + " " + r.URL.Path
+		rt, ok := routes[key]
+		if !ok {
+			t.Errorf("unexpected request %s", key)
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"ErrorMessage":"no route in test"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(rt.status)
+		_, _ = io.WriteString(w, rt.body)
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := New(Options{
+		BaseURL:  srv.URL,
+		ClientID: "cid",
+		Locale:   Locale{Site: "US", Language: "en", Currency: "USD"},
+		Tokens:   &staticTokens{app: "app-tok", user: "user-tok"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc.Client = client
+	return rc
+}
+
+const twoListsBody = `[
+  {"Id":"aaa-111","ListName":"Bench PSU rev A","TotalParts":3,"DateModified":"2026-08-01T10:00:00Z"},
+  {"Id":"bbb-222","ListName":"Audio Amp","TotalParts":0,"DateModified":"2026-07-15T09:00:00Z"}
+]`
+
+func TestListsUsesUserToken(t *testing.T) {
+	tokens := &staticTokens{app: "app-tok", user: "user-tok"}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// MyLists rejects a client-credentials token, so dk must send the
+		// 3-legged one.
+		if got := r.Header.Get("Authorization"); got != "Bearer user-tok" {
+			t.Errorf("Authorization = %q, want the user token", got)
+		}
+		_, _ = io.WriteString(w, twoListsBody)
+	}))
+	defer srv.Close()
+
+	client, err := New(Options{BaseURL: srv.URL, ClientID: "cid", Tokens: tokens})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Lists(context.Background(), 0, 0); err != nil {
+		t.Fatalf("Lists() error = %v", err)
+	}
+	if !tokens.requestedUser {
+		t.Error("Lists() did not request a user token")
+	}
+}
+
+func TestListsPagingQuery(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{"GET /mylists/v1/lists": {http.StatusOK, twoListsBody}})
+
+	if _, err := rc.Lists(context.Background(), 10, 25); err != nil {
+		t.Fatal(err)
+	}
+	q := rc.requests[0].Query
+	if !strings.Contains(q, "startIndex=10") || !strings.Contains(q, "limit=25") {
+		t.Errorf("query = %q, want startIndex=10 and limit=25", q)
+	}
+}
+
+func TestListsOmitsZeroPaging(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{"GET /mylists/v1/lists": {http.StatusOK, twoListsBody}})
+
+	if _, err := rc.Lists(context.Background(), 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	// limit=0 would be read as "return nothing" rather than "use the default".
+	if q := rc.requests[0].Query; q != "" {
+		t.Errorf("query = %q, want it empty so DigiKey applies its defaults", q)
+	}
+}
+
+func TestResolveListByID(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{"GET /mylists/v1/lists": {http.StatusOK, twoListsBody}})
+
+	got, err := rc.ResolveList(context.Background(), "bbb-222")
+	if err != nil {
+		t.Fatalf("ResolveList() error = %v", err)
+	}
+	if got.ListName != "Audio Amp" {
+		t.Errorf("ListName = %q, want Audio Amp", got.ListName)
+	}
+}
+
+func TestResolveListByName(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{"GET /mylists/v1/lists": {http.StatusOK, twoListsBody}})
+
+	got, err := rc.ResolveList(context.Background(), "Bench PSU rev A")
+	if err != nil {
+		t.Fatalf("ResolveList() error = %v", err)
+	}
+	if got.ID != "aaa-111" {
+		t.Errorf("ID = %q, want aaa-111", got.ID)
+	}
+}
+
+func TestResolveListCaseInsensitiveFallback(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{"GET /mylists/v1/lists": {http.StatusOK, twoListsBody}})
+
+	got, err := rc.ResolveList(context.Background(), "audio amp")
+	if err != nil {
+		t.Fatalf("ResolveList() error = %v", err)
+	}
+	if got.ID != "bbb-222" {
+		t.Errorf("ID = %q, want bbb-222", got.ID)
+	}
+}
+
+func TestResolveListExactMatchBeatsCaseInsensitive(t *testing.T) {
+	body := `[{"Id":"1","ListName":"psu"},{"Id":"2","ListName":"PSU"}]`
+	rc := newRoutedClient(t, map[string]route{"GET /mylists/v1/lists": {http.StatusOK, body}})
+
+	// Two lists differing only in case must not be ambiguous when the caller
+	// typed one of them exactly.
+	got, err := rc.ResolveList(context.Background(), "PSU")
+	if err != nil {
+		t.Fatalf("ResolveList() error = %v", err)
+	}
+	if got.ID != "2" {
+		t.Errorf("ID = %q, want 2 (the exact-case match)", got.ID)
+	}
+}
+
+func TestResolveListNotFound(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{"GET /mylists/v1/lists": {http.StatusOK, twoListsBody}})
+
+	_, err := rc.ResolveList(context.Background(), "Nonexistent")
+	if !errors.Is(err, ErrListNotFound) {
+		t.Errorf("ResolveList() error = %v, want ErrListNotFound", err)
+	}
+}
+
+func TestResolveListAmbiguous(t *testing.T) {
+	body := `[{"Id":"1","ListName":"project"},{"Id":"2","ListName":"PROJECT"},{"Id":"3","ListName":"other"}]`
+	rc := newRoutedClient(t, map[string]route{"GET /mylists/v1/lists": {http.StatusOK, body}})
+
+	_, err := rc.ResolveList(context.Background(), "Project")
+	var ambiguous *ErrAmbiguousList
+	if !errors.As(err, &ambiguous) {
+		t.Fatalf("ResolveList() error = %v, want *ErrAmbiguousList", err)
+	}
+	if len(ambiguous.Candidate) != 2 {
+		t.Errorf("got %d candidates, want 2", len(ambiguous.Candidate))
+	}
+	// The message must name the ids so the caller can disambiguate.
+	for _, id := range []string{"1", "2"} {
+		if !strings.Contains(err.Error(), id) {
+			t.Errorf("error %q should list candidate id %q", err, id)
+		}
+	}
+}
+
+func TestResolveListRejectsEmptyInput(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{})
+	if _, err := rc.ResolveList(context.Background(), "  "); err == nil {
+		t.Error("ResolveList(\"\") error = nil, want a validation error")
+	}
+	if len(rc.requests) != 0 {
+		t.Error("ResolveList(\"\") made a network call before validating its input")
+	}
+}
+
+func TestCreateListRequestAndResponse(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{
+		"POST /mylists/v1/lists": {http.StatusOK, `"new-list-id"`},
+	})
+
+	id, err := rc.CreateList(context.Background(), CreateListRequest{
+		ListName: "Bench PSU rev A",
+		Tags:     []string{"project"},
+		Source:   "external",
+	})
+	if err != nil {
+		t.Fatalf("CreateList() error = %v", err)
+	}
+	// DigiKey returns the id as a bare JSON string, not an object.
+	if id != "new-list-id" {
+		t.Errorf("CreateList() = %q, want new-list-id", id)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rc.requests[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["ListName"] != "Bench PSU rev A" {
+		t.Errorf("ListName = %v, want the PascalCase field to carry the name", body["ListName"])
+	}
+}
+
+func TestCreateListRejectsEmptyName(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{})
+	if _, err := rc.CreateList(context.Background(), CreateListRequest{ListName: " "}); err == nil {
+		t.Error("CreateList(\"\") error = nil, want a validation error")
+	}
+}
+
+func TestAddPartsBuildsRequest(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{
+		"POST /mylists/v1/lists/aaa-111/parts": {http.StatusOK, `["uid-1","uid-2"]`},
+	})
+
+	ids, err := rc.AddParts(context.Background(), "aaa-111", []RequestedPart{
+		{
+			RequestedPartNumber: "490-1532-1-ND",
+			ReferenceDesignator: "C1,C2",
+			Notes:               "decoupling",
+			Quantities:          []RequestedQuantity{{Quantity: 10}},
+		},
+		{
+			RequestedPartNumber: "311-10.0KHRCT-ND",
+			Quantities:          []RequestedQuantity{{Quantity: 20}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("AddParts() error = %v", err)
+	}
+	if len(ids) != 2 || ids[0] != "uid-1" {
+		t.Errorf("AddParts() = %v, want [uid-1 uid-2]", ids)
+	}
+
+	// The body must be a bare array of RequestedPart, not a wrapper object.
+	var parts []map[string]any
+	if err := json.Unmarshal(rc.requests[0].Body, &parts); err != nil {
+		t.Fatalf("request body is not a json array: %v (%s)", err, rc.requests[0].Body)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("sent %d parts, want 2", len(parts))
+	}
+	if parts[0]["RequestedPartNumber"] != "490-1532-1-ND" {
+		t.Errorf("RequestedPartNumber = %v", parts[0]["RequestedPartNumber"])
+	}
+	if parts[0]["ReferenceDesignator"] != "C1,C2" {
+		t.Errorf("ReferenceDesignator = %v, want C1,C2", parts[0]["ReferenceDesignator"])
+	}
+	quantities, ok := parts[0]["Quantities"].([]any)
+	if !ok || len(quantities) != 1 {
+		t.Fatalf("Quantities = %v, want one entry", parts[0]["Quantities"])
+	}
+	if q := quantities[0].(map[string]any); q["Quantity"] != float64(10) {
+		t.Errorf("Quantity = %v, want 10", q["Quantity"])
+	}
+	// The second part carried no metadata; those fields must be omitted rather
+	// than sent as empty strings.
+	if _, present := parts[1]["Notes"]; present {
+		t.Error("empty Notes was serialized instead of omitted")
+	}
+}
+
+func TestAddPartsValidatesInput(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{})
+
+	if _, err := rc.AddParts(context.Background(), "", []RequestedPart{{RequestedPartNumber: "x"}}); err == nil {
+		t.Error("AddParts with no list id error = nil, want a validation error")
+	}
+	if _, err := rc.AddParts(context.Background(), "aaa", nil); err == nil {
+		t.Error("AddParts with no parts error = nil, want a validation error")
+	}
+	if len(rc.requests) != 0 {
+		t.Error("AddParts made a network call despite invalid input")
+	}
+}
+
+func TestListPartsQueryCarriesLocale(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{
+		"GET /mylists/v1/lists/aaa-111/parts": {http.StatusOK, `{"PartsList":[],"TotalParts":0}`},
+	})
+
+	_, err := rc.ListParts(context.Background(), "aaa-111", 0, 0, Locale{Site: "DE", Language: "de", Currency: "EUR"})
+	if err != nil {
+		t.Fatalf("ListParts() error = %v", err)
+	}
+
+	// This endpoint takes locale as query parameters, not headers.
+	q := rc.requests[0].Query
+	for _, want := range []string{"countryIso=DE", "languageIso=de", "currencyIso=EUR"} {
+		if !strings.Contains(q, want) {
+			t.Errorf("query = %q, want it to contain %q", q, want)
+		}
+	}
+}
+
+func TestListPartsDecodesPricing(t *testing.T) {
+	body := `{
+	  "TotalParts": 1,
+	  "PartsList": [{
+	    "UniqueId": "uid-1",
+	    "DigiKeyPartNumber": "490-1532-1-ND",
+	    "ManufacturerPartNumber": "GRM188R71C104KA01D",
+	    "Manufacturer": "Murata Electronics",
+	    "Description": "CAP CER 0.1UF",
+	    "ReferenceDesignator": "C1,C2",
+	    "QuantityAvailable": 250000,
+	    "PartStatus": "Active",
+	    "Flags": {"IsMatched": true},
+	    "Quantities": [{
+	      "QuantityRequested": 10,
+	      "SelectedPackType": "Cut Tape",
+	      "PackOptions": [{"DigiKeyPartNumber":"490-1532-1-ND","PackType":"Cut Tape",
+	                       "CalculatedUnitPrice":0.048,"ExtendedPrice":0.48}]
+	    }]
+	  }]
+	}`
+	rc := newRoutedClient(t, map[string]route{
+		"GET /mylists/v1/lists/aaa-111/parts": {http.StatusOK, body},
+	})
+
+	resp, err := rc.ListParts(context.Background(), "aaa-111", 0, 0, Locale{})
+	if err != nil {
+		t.Fatalf("ListParts() error = %v", err)
+	}
+	if len(resp.PartsList) != 1 {
+		t.Fatalf("got %d parts, want 1", len(resp.PartsList))
+	}
+
+	p := resp.PartsList[0]
+	if got := p.RequestedQty(); got != 10 {
+		t.Errorf("RequestedQty() = %d, want 10", got)
+	}
+	if got := p.UnitPrice(); got != 0.048 {
+		t.Errorf("UnitPrice() = %v, want 0.048", got)
+	}
+	if got := p.ExtendedPrice(); got != 0.48 {
+		t.Errorf("ExtendedPrice() = %v, want 0.48", got)
+	}
+	if !p.Flags.IsMatched {
+		t.Error("IsMatched = false, want true")
+	}
+}
+
+func TestListPartPricingHelpersOnUnpricedLine(t *testing.T) {
+	// An unmatched part has no pack options at all; the helpers must return
+	// zero rather than panic on an empty slice.
+	p := ListPart{Quantities: []ListPartQuantity{{QuantityRequested: 5}}}
+	if got := p.RequestedQty(); got != 5 {
+		t.Errorf("RequestedQty() = %d, want 5", got)
+	}
+	if got := p.UnitPrice(); got != 0 {
+		t.Errorf("UnitPrice() = %v, want 0", got)
+	}
+	if got := p.ExtendedPrice(); got != 0 {
+		t.Errorf("ExtendedPrice() = %v, want 0", got)
+	}
+
+	empty := ListPart{}
+	if got := empty.RequestedQty(); got != 0 {
+		t.Errorf("RequestedQty() on an empty part = %d, want 0", got)
+	}
+}
+
+func TestRequestedQtySumsMultipleLines(t *testing.T) {
+	// DigiKey allows several quantity lines per part (e.g. split pack types).
+	p := ListPart{Quantities: []ListPartQuantity{
+		{QuantityRequested: 10},
+		{QuantityRequested: 5},
+	}}
+	if got := p.RequestedQty(); got != 15 {
+		t.Errorf("RequestedQty() = %d, want 15", got)
+	}
+}
+
+func TestRenameListEscapesPathSegments(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{
+		"PUT /mylists/v1/lists/aaa-111/listName/New Name/v2": {http.StatusOK, ""},
+	})
+
+	// The new name goes in the path, so slashes and spaces must be escaped.
+	if err := rc.RenameList(context.Background(), "aaa-111", "New Name/v2"); err != nil {
+		t.Fatalf("RenameList() error = %v", err)
+	}
+	raw := rc.requests[0].RawURI
+	if !strings.Contains(raw, "New%20Name%2Fv2") {
+		t.Errorf("request target = %q, want the new name percent-encoded", raw)
+	}
+}
+
+func TestRenameListValidatesInput(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{})
+	if err := rc.RenameList(context.Background(), "", "x"); err == nil {
+		t.Error("RenameList with no list id error = nil, want a validation error")
+	}
+	if err := rc.RenameList(context.Background(), "aaa", " "); err == nil {
+		t.Error("RenameList with an empty name error = nil, want a validation error")
+	}
+}
+
+func TestDeletePartPath(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{
+		"DELETE /mylists/v1/lists/aaa-111/parts/uid-1": {http.StatusNoContent, ""},
+	})
+	if err := rc.DeletePart(context.Background(), "aaa-111", "uid-1"); err != nil {
+		t.Fatalf("DeletePart() error = %v", err)
+	}
+	if rc.requests[0].Method != http.MethodDelete {
+		t.Errorf("method = %s, want DELETE", rc.requests[0].Method)
+	}
+}
+
+func TestGetListDecodesRequestedParts(t *testing.T) {
+	body := `{"Id":"aaa-111","ListName":"Bench PSU rev A","TotalParts":1,
+	  "Tags":["project"],
+	  "PartsList":[{"UniqueId":"uid-1","RequestedPartNumber":"490-1532-1-ND",
+	                "Quantities":[{"Quantity":10}]}]}`
+	rc := newRoutedClient(t, map[string]route{
+		"GET /mylists/v1/lists/aaa-111": {http.StatusOK, body},
+	})
+
+	got, err := rc.GetList(context.Background(), "aaa-111")
+	if err != nil {
+		t.Fatalf("GetList() error = %v", err)
+	}
+	if got.ListName != "Bench PSU rev A" || len(got.PartsList) != 1 {
+		t.Errorf("GetList() = %+v, want one part on the named list", got)
+	}
+	if got.PartsList[0].Quantities[0].Quantity != 10 {
+		t.Errorf("Quantity = %d, want 10", got.PartsList[0].Quantities[0].Quantity)
+	}
+}
+
+func TestIsValidListNameDecodesBareBool(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{
+		"GET /mylists/v1/lists/validate/Bench PSU": {http.StatusOK, `true`},
+	})
+	ok, err := rc.IsValidListName(context.Background(), "Bench PSU")
+	if err != nil {
+		t.Fatalf("IsValidListName() error = %v", err)
+	}
+	if !ok {
+		t.Error("IsValidListName() = false, want true")
+	}
+}
+
+func TestSuggestListNameDecodesBareString(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{
+		"GET /mylists/v1/lists/validate/name/Bench PSU": {http.StatusOK, `"Bench PSU (2)"`},
+	})
+	got, err := rc.SuggestListName(context.Background(), "Bench PSU")
+	if err != nil {
+		t.Fatalf("SuggestListName() error = %v", err)
+	}
+	if got != "Bench PSU (2)" {
+		t.Errorf("SuggestListName() = %q, want %q", got, "Bench PSU (2)")
+	}
+}
+
+func TestMyListsErrorSurfacesRequestID(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{
+		"GET /mylists/v1/lists/missing": {http.StatusNotFound,
+			`{"StatusCode":404,"ErrorMessage":"List not found","RequestId":"req-9"}`},
+	})
+
+	_, err := rc.GetList(context.Background(), "missing")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error type = %T, want *APIError", err)
+	}
+	if !apiErr.NotFound() {
+		t.Errorf("NotFound() = false for a 404")
+	}
+	if apiErr.RequestID != "req-9" {
+		t.Errorf("RequestID = %q, want req-9", apiErr.RequestID)
+	}
+}
