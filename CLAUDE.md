@@ -72,6 +72,22 @@ leading dots; `TestDocumentFilenameIsContained` is the guard. Downloads are
 atomic (temp file + rename), size-capped, and carry no `Authorization` header,
 since the files live on a CDN rather than the API.
 
+## Endpoint coverage
+
+Product Information v4 is fully covered except `/pricing`, `/pricingbyquantity`,
+and `/digireelpricing`. Those are deliberate omissions: `ProductDetails` already
+returns `MyPricing` per variation, `packagetypebyquantity` returns strictly more
+than `pricingbyquantity`, and DigiReel is a custom-reel service irrelevant to
+this tool's purpose. Note that `dk pricing` wraps `packagetypebyquantity`, *not*
+the `/pricing` endpoint — the command is named for what it answers.
+
+MyLists v1 is fully covered at both the client and command layers.
+
+`ProductSummary` (associations, alternate packaging) returns `UnitPrice` as a
+preformatted **string**; `Product` and `RecommendedProduct` return it as a
+**number**. Do not unify these — it is DigiKey's inconsistency, and flattening it
+would mean parsing currency-formatted text.
+
 ## Auth model
 
 Product Information accepts a `client_credentials` token. MyLists requires an

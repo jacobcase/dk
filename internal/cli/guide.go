@@ -122,8 +122,45 @@ PARAMETRIC FILTERING
 
 PRODUCT DETAIL
   dk product <part-number> [--variations] [--parameters] [--substitutes]
+                           [--recommended] [--alternate-packaging]
   Accepts a DigiKey or manufacturer part number. In JSON mode the full view
   (parameters, price breaks, variations) is always returned regardless of flags.
+  The view flags are mutually exclusive.
+    --substitutes          what you could buy INSTEAD of this part
+    --recommended          what others bought alongside it
+    --alternate-packaging  the same part in other packaging
+
+WHAT ELSE DO I NEED TO BUY?
+  dk related <part-number> [--kind mating|kits|accessories|for-use-with|all]
+
+  Returns the products DigiKey relates to a part: the other half of a connector
+  pair, kits containing it, crimpers and tools. Distinct from --substitutes:
+  "related" is what you need ALONGSIDE the part, not instead of it.
+
+  JSON: {"part_number","products":[{"relation","digikey_part_number",
+         "manufacturer_part_number","manufacturer","description","unit_price",
+         "quantity_available"}],"counts":{"mating":N,...}}
+  Check .counts to see if a mating half exists without scanning the list.
+  unit_price is a preformatted STRING here, not a number.
+  Most parts have no associations; an empty result is normal, not an error.
+
+COSTING A QUANTITY
+  dk pricing <part-number> --qty N [--packaging CutTapeOrTR|DigiReelOrTR|StandardPack]
+
+  Answers "I need N of these — what do I order and what does it cost?" Prices
+  every packaging option for the requested quantity.
+
+  JSON: {"part_number","requested_quantity","currency",
+         "best":{...} | null,
+         "options":[{"digikey_part_number","packaging","order_quantity",
+                     "forced_up","minimum_order_quantity","unit_price",
+                     "extended_price","quantity_available","in_stock"}]}
+
+  Read .best first: the cheapest option that is actually in stock, or null if
+  none are. Read .forced_up before recommending anything — it is true when a
+  minimum order or standard pack forces order_quantity above what was asked
+  for. That is how a request for 250 becomes a 4000-piece reel. Always report
+  order_quantity and extended_price to the human, not just the unit price.
 
 DATASHEETS AND DOCUMENTS
   The primary datasheet URL is already in search and product output as
@@ -146,7 +183,10 @@ LISTS
   dk list show <list>                         parts with live pricing and stock
   dk list add <list> <part[:qty]>... [--qty N] [--ref R1,R2] [--note TEXT]
                                               [--from-json FILE|-] [--verify]
+  dk list set <list> <unique-id-or-part> [--qty N] [--ref R] [--note TEXT]
+                                              [--customer-ref C]
   dk list rm <list> <unique-id-or-part>...
+  dk list copy <source-list> <new-name> [--auto-rename]
   dk list rename <list> <new-name>
   dk list delete <list> [--force]
   dk list export <list> --output csv          BOM-shaped columns
@@ -158,6 +198,14 @@ LISTS
   Bulk add with per-part metadata:
     echo '[{"part":"1276-1000-1-ND","quantity":10,"reference":"C1-C10",
             "note":"input decoupling"}]' | dk list add "My List" --from-json -
+
+  Use "dk list set" to change a quantity, NOT rm followed by add: set edits in
+  place and keeps the unique id, reference designators, and notes. Only the
+  flags you pass are changed. An ambiguous target is an error (unlike rm, which
+  applies to every match), so pass the unique id when a part appears twice.
+
+  "dk list copy" clones a list, which is the clean way to start a rev B without
+  disturbing a BOM you have already reviewed.
 
   --verify checks each part against the catalog first and skips ones that do not
   resolve. Without it, DigiKey silently accepts unknown part numbers and marks
@@ -202,11 +250,15 @@ RECOMMENDED AGENT WORKFLOW
      If too many matches, narrow parametrically:
        dk filters "<part description>" --output json
        dk search "<part description>" --param "<name>=<value>" --in-stock
-  3. Pick a part; confirm packaging with dk product <dkpn> --variations
-  4. dk list create "<project name>"               once per project
-  5. dk list add "<project>" <dkpn>:<qty> --ref <designators> --verify
-  6. dk list show "<project>" --output json        verify matched and totals
-  7. Report the list URL to the human for review and ordering.
+  3. Pick a part; confirm what buying your quantity really means:
+       dk pricing <dkpn> --qty <n> --output json   check .best and .forced_up
+  4. For connectors and terminals, check what else is needed:
+       dk related <dkpn> --output json             mating half, crimper, kit
+  5. dk list create "<project name>"               once per project
+  6. dk list add "<project>" <dkpn>:<qty> --ref <designators> --verify
+     Correcting a quantity later: dk list set "<project>" <dkpn> --qty <n>
+  7. dk list show "<project>" --output json        verify matched and totals
+  8. Report the list URL to the human for review and ordering.
 
 NOTES
   - Prices exclude shipping and tax. estimated_total is a rough figure and skips

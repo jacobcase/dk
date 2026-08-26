@@ -110,6 +110,8 @@ returns your account-specific pricing (`MyPricing`) instead of list pricing.
 dk search <keywords...>       search the catalog
 dk filters <keywords...>      discover the filters available for a search
 dk product <part-number>      full detail for one part
+dk related <part-number>      mating halves, kits, accessories
+dk pricing <part-number>      cost a quantity across packaging options
 dk docs <part-number>         list or download datasheets and documents
 dk categories [id]            browse the category taxonomy
 dk manufacturers              list manufacturer ids
@@ -118,7 +120,9 @@ dk list ls                    your lists
 dk list create <name>         create a list
 dk list show <list>           parts with live pricing and stock
 dk list add <list> <part>...  add parts
+dk list set <list> <part>     change quantity / refs / notes in place
 dk list rm <list> <part>...   remove parts
+dk list copy <list> <name>    clone a list (e.g. rev A -> rev B)
 dk list rename <list> <name>  rename
 dk list delete <list>         delete (needs --force if non-empty)
 dk list export <list>         BOM-shaped output, pairs with --output csv
@@ -159,6 +163,22 @@ cat bom.json | dk list add "Bench PSU rev A" --from-json -
   {"part": "311-10.0KHRCT-ND", "quantity": 20, "reference": "R1-R20"}
 ]
 ```
+
+### Editing a list
+
+Use `dk list set` to change a quantity — not `rm` followed by `add`:
+
+```
+dk list set "Bench PSU rev A" 1276-1000-1-ND --qty 20
+dk list set "Bench PSU rev A" 1276-1000-1-ND --ref C1-C20 --note "bulk decoupling"
+```
+
+`set` edits in place, so the unique ID, reference designators, and notes survive;
+only the flags you pass change. An ambiguous target is an error (unlike `rm`,
+which applies to every match) — pass the unique ID when a part appears twice.
+
+`dk list copy "rev A" "rev B"` clones a list, which is the clean way to start a
+revision without disturbing a BOM you have already reviewed.
 
 **`--verify` is worth using.** DigiKey accepts unknown part numbers without
 complaint and simply marks the line unmatched. `--verify` checks each part
@@ -221,6 +241,36 @@ Details worth knowing:
 - `--param` costs one extra API call, for discovery.
 - Values with `range_type` of `Min`/`Max`/`Range` are synthetic bounds DigiKey
   attaches to numeric parameters, not discrete choices.
+
+## Buying the right quantity
+
+The same part number can be a trap: ask for 250 and a minimum order or standard
+pack can land you a 4000-piece reel.
+
+```
+$ dk pricing 311-10.0KHRCT-ND --qty 250
+DKPN                PACKAGING        ORDER QTY  FORCED-UP  UNIT    EXTENDED  STOCK
+311-10.0KHRCT-ND    Cut Tape (CT)    250        false      0.0200  5.0000    50000
+311-10.0KHRTR-ND    Tape & Reel (TR) 4000       true       0.0050  20.0000   12000
+
+Cheapest in stock: 311-10.0KHRCT-ND (Cut Tape (CT)), order 250 for 5.0000 USD total.
+```
+
+`FORCED-UP` is the column that matters. In JSON, read `.best` (cheapest option
+actually in stock, or `null`) and `.forced_up`.
+
+## What else do I need to buy?
+
+```
+$ dk related WM4200-ND
+RELATION   DKPN        MPN         MFR    DESCRIPTION           STOCK  UNIT
+mating     WM4300-ND   22-01-3037  Molex  CONN HOUSING 3POS     15000  $0.28
+accessory  WM9999-ND   63811-1000  Molex  HAND CRIMP TOOL       12     $249.00
+```
+
+Connector → mating half, terminal → crimper, board → compatible accessories.
+`--kind mating` narrows it. This is a different question from
+`dk product --substitutes`, which is what you'd buy *instead*.
 
 ### Packaging variations matter
 

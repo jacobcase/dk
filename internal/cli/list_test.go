@@ -735,3 +735,243 @@ func TestParsePositiveInt(t *testing.T) {
 		t.Errorf("parsePositiveInt(\" 42 \") = (%d, %v), want (42, nil)", got, err)
 	}
 }
+
+// listDataBody is GetListByListId output: the editable RequestedPart shape,
+// which is what UpdatePart round-trips.
+const listDataBody = `{
+  "Id":"aaa-111","ListName":"Bench PSU rev A","TotalParts":2,
+  "PartsList":[
+    {"UniqueId":"uid-1","RequestedPartNumber":"490-1532-1-ND",
+     "ReferenceDesignator":"C1,C2","Notes":"decoupling",
+     "Quantities":[{"Quantity":10,"SelectedPackType":"Cut Tape"}]},
+    {"UniqueId":"uid-2","RequestedPartNumber":"TYPO-PART-123",
+     "Quantities":[{"Quantity":5}]}
+  ]}`
+
+func TestListSetQuantity(t *testing.T) {
+	m := newMockDigiKey(t)
+	m.handle("GET", "/mylists/v1/lists", http.StatusOK, listsBody)
+	m.handle("GET", "/mylists/v1/lists/aaa-111/parts", http.StatusOK, listPartsBody)
+	m.handle("GET", "/mylists/v1/lists/aaa-111", http.StatusOK, listDataBody)
+	m.handle("PUT", "/mylists/v1/lists/aaa-111/parts/uid-1", http.StatusOK, "")
+
+	res := runAuthed(t, m, "list", "set", "Bench PSU rev A", "490-1532-1-ND", "--qty", "20")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+
+	var got SetResult
+	res.JSON(t, &got)
+	if got.Before.Quantity != 10 || got.After.Quantity != 20 {
+		t.Errorf("quantity %d -> %d, want 10 -> 20", got.Before.Quantity, got.After.Quantity)
+	}
+	// The unique id surviving is the whole point: rm+add would mint a new one.
+	if got.UniqueID != "uid-1" {
+		t.Errorf("unique_id = %q, want uid-1", got.UniqueID)
+	}
+	if len(got.Changed) != 1 || got.Changed[0] != "quantity" {
+		t.Errorf("changed = %v, want only quantity", got.Changed)
+	}
+
+	var body map[string]any
+	for _, r := range m.requests {
+		if r.Method == http.MethodPut && strings.Contains(r.Path, "/parts/uid-1") {
+			if err := json.Unmarshal([]byte(r.Body), &body); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if body == nil {
+		t.Fatal("no PUT was sent")
+	}
+	quantities := body["Quantities"].([]any)
+	if q := quantities[0].(map[string]any); q["Quantity"] != float64(20) {
+		t.Errorf("Quantity = %v, want 20", q["Quantity"])
+	}
+	// DigiKey's update is a replace, so untouched fields must be sent back
+	// intact rather than silently cleared.
+	if body["ReferenceDesignator"] != "C1,C2" {
+		t.Errorf("ReferenceDesignator = %v, want it preserved", body["ReferenceDesignator"])
+	}
+	if body["Notes"] != "decoupling" {
+		t.Errorf("Notes = %v, want it preserved", body["Notes"])
+	}
+	if q := quantities[0].(map[string]any); q["SelectedPackType"] != "Cut Tape" {
+		t.Errorf("SelectedPackType = %v, want the existing pack type preserved", q["SelectedPackType"])
+	}
+}
+
+func TestListSetMetadataOnly(t *testing.T) {
+	m := newMockDigiKey(t)
+	m.handle("GET", "/mylists/v1/lists", http.StatusOK, listsBody)
+	m.handle("GET", "/mylists/v1/lists/aaa-111/parts", http.StatusOK, listPartsBody)
+	m.handle("GET", "/mylists/v1/lists/aaa-111", http.StatusOK, listDataBody)
+	m.handle("PUT", "/mylists/v1/lists/aaa-111/parts/uid-1", http.StatusOK, "")
+
+	res := runAuthed(t, m, "list", "set", "aaa-111", "uid-1", "--ref", "C1-C10", "--note", "bulk")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+
+	var got SetResult
+	res.JSON(t, &got)
+	// Quantity was not passed, so it must not change.
+	if got.After.Quantity != 10 {
+		t.Errorf("quantity = %d, want it untouched at 10", got.After.Quantity)
+	}
+	if got.After.ReferenceDesignator != "C1-C10" || got.After.Notes != "bulk" {
+		t.Errorf("after = %+v", got.After)
+	}
+}
+
+func TestListSetRequiresAChange(t *testing.T) {
+	res := runAuthed(t, newMockDigiKey(t), "list", "set", "aaa-111", "uid-1")
+	if res.Code != ExitUsage {
+		t.Fatalf("exit code = %d, want %d\nstderr: %s", res.Code, ExitUsage, res.Stderr)
+	}
+	if !strings.Contains(res.Stderr, "--qty") {
+		t.Errorf("error should name the flags that would change something:\n%s", res.Stderr)
+	}
+}
+
+func TestListSetRejectsZeroQuantity(t *testing.T) {
+	res := runAuthed(t, newMockDigiKey(t), "list", "set", "aaa-111", "uid-1", "--qty", "0")
+	if res.Code != ExitUsage {
+		t.Fatalf("exit code = %d, want %d", res.Code, ExitUsage)
+	}
+	// Quantity zero is a removal, and should say so rather than silently
+	// creating a zero-quantity line.
+	if !strings.Contains(res.Stderr, "list rm") {
+		t.Errorf("error should point at `dk list rm`:\n%s", res.Stderr)
+	}
+}
+
+func TestListSetUnknownPartExits4(t *testing.T) {
+	m := newMockDigiKey(t)
+	m.handle("GET", "/mylists/v1/lists", http.StatusOK, listsBody)
+	m.handle("GET", "/mylists/v1/lists/aaa-111/parts", http.StatusOK, listPartsBody)
+
+	res := runAuthed(t, m, "list", "set", "aaa-111", "NOT-IN-LIST", "--qty", "5")
+	if res.Code != ExitNotFound {
+		t.Fatalf("exit code = %d, want %d\nstderr: %s", res.Code, ExitNotFound, res.Stderr)
+	}
+}
+
+func TestListSetAmbiguousTargetIsRejected(t *testing.T) {
+	m := newMockDigiKey(t)
+	m.handle("GET", "/mylists/v1/lists", http.StatusOK, listsBody)
+	// Two lines carrying the same part number.
+	m.handle("GET", "/mylists/v1/lists/aaa-111/parts", http.StatusOK, `{"TotalParts":2,"PartsList":[
+	  {"UniqueId":"uid-1","DigiKeyPartNumber":"DUP-ND","Quantities":[{"QuantityRequested":1}]},
+	  {"UniqueId":"uid-3","DigiKeyPartNumber":"DUP-ND","Quantities":[{"QuantityRequested":2}]}]}`)
+
+	res := runAuthed(t, m, "list", "set", "aaa-111", "DUP-ND", "--qty", "5")
+	// Unlike rm, editing every match would be destructive guesswork.
+	if res.Code != ExitUsage {
+		t.Fatalf("exit code = %d, want %d\nstderr: %s", res.Code, ExitUsage, res.Stderr)
+	}
+	if !strings.Contains(res.Stderr, "unique id") {
+		t.Errorf("error should tell the caller to use the unique id:\n%s", res.Stderr)
+	}
+	for _, r := range m.requests {
+		if r.Method == http.MethodPut {
+			t.Error("a PUT was issued despite the ambiguity")
+		}
+	}
+}
+
+func TestListCopy(t *testing.T) {
+	m := newMockDigiKey(t)
+	m.handle("GET", "/mylists/v1/lists", http.StatusOK, listsBody)
+	m.handle("POST", "/mylists/v1/lists", http.StatusOK, `"copied-id"`)
+
+	res := runAuthed(t, m, "list", "copy", "Bench PSU rev A", "Bench PSU rev B")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+
+	var got ListView
+	res.JSON(t, &got)
+	if got.ID != "copied-id" || got.Name != "Bench PSU rev B" {
+		t.Errorf("view = %+v", got)
+	}
+
+	var body map[string]any
+	for _, r := range m.requests {
+		if r.Method == http.MethodPost && r.Path == "/mylists/v1/lists" {
+			_ = json.Unmarshal([]byte(r.Body), &body)
+		}
+	}
+	refList, ok := body["RefList"].(map[string]any)
+	if !ok {
+		t.Fatalf("RefList missing from the create body: %v", body)
+	}
+	// RefList is what makes DigiKey seed the new list from the old one.
+	if refList["ListId"] != "aaa-111" {
+		t.Errorf("RefList.ListId = %v, want the source list id", refList["ListId"])
+	}
+}
+
+func TestListCopyResolvesSourceByName(t *testing.T) {
+	m := newMockDigiKey(t)
+	m.handle("GET", "/mylists/v1/lists", http.StatusOK, listsBody)
+	m.handle("POST", "/mylists/v1/lists", http.StatusOK, `"new"`)
+
+	if res := runAuthed(t, m, "list", "copy", "audio amp", "Audio Amp v2"); res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+	var body map[string]any
+	for _, r := range m.requests {
+		if r.Method == http.MethodPost {
+			_ = json.Unmarshal([]byte(r.Body), &body)
+		}
+	}
+	if refList := body["RefList"].(map[string]any); refList["ListId"] != "bbb-222" {
+		t.Errorf("RefList.ListId = %v, want bbb-222 resolved from the name", refList["ListId"])
+	}
+}
+
+func TestListCopyRejectsEmptyName(t *testing.T) {
+	res := runAuthed(t, newMockDigiKey(t), "list", "copy", "aaa-111", "  ")
+	if res.Code != ExitUsage {
+		t.Errorf("exit code = %d, want %d", res.Code, ExitUsage)
+	}
+}
+
+func TestSetQuantityPreservesPackType(t *testing.T) {
+	got := setQuantity([]digikey.RequestedQuantity{
+		{Quantity: 10, SelectedPackType: "Cut Tape", TargetPrice: 0.05},
+	}, 25)
+	if len(got) != 1 {
+		t.Fatalf("got %d quantity lines, want 1", len(got))
+	}
+	if got[0].Quantity != 25 {
+		t.Errorf("Quantity = %d, want 25", got[0].Quantity)
+	}
+	if got[0].SelectedPackType != "Cut Tape" {
+		t.Errorf("SelectedPackType = %q, want it preserved", got[0].SelectedPackType)
+	}
+}
+
+func TestSetQuantityOnEmptyLine(t *testing.T) {
+	got := setQuantity(nil, 7)
+	if len(got) != 1 || got[0].Quantity != 7 {
+		t.Errorf("setQuantity(nil, 7) = %+v, want one line of 7", got)
+	}
+}
+
+func TestFindRequestedPart(t *testing.T) {
+	parts := []digikey.RequestedPart{
+		{UniqueID: "uid-1", RequestedPartNumber: "A"},
+		{UniqueID: "uid-2", RequestedPartNumber: "B"},
+	}
+	if got, ok := findRequestedPart(parts, "uid-2"); !ok || got.RequestedPartNumber != "B" {
+		t.Errorf("findRequestedPart(uid-2) = (%+v, %v)", got, ok)
+	}
+	if got, ok := findRequestedPart(parts, "UID-1"); !ok || got.RequestedPartNumber != "A" {
+		t.Errorf("findRequestedPart should be case-insensitive, got (%+v, %v)", got, ok)
+	}
+	if _, ok := findRequestedPart(parts, "nope"); ok {
+		t.Error("findRequestedPart(nope) ok = true")
+	}
+}

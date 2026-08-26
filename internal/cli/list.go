@@ -131,11 +131,285 @@ account. Run "dk auth login" once; the refresh token does not expire.`,
 		newListCreateCommand(app),
 		newListShowCommand(app),
 		newListAddCommand(app),
+		newListSetCommand(app),
 		newListRemoveCommand(app),
 		newListRenameCommand(app),
+		newListCopyCommand(app),
 		newListDeleteCommand(app),
 		newListExportCommand(app),
 	)
+	return cmd
+}
+
+// SetResult is the JSON shape of `dk list set`.
+type SetResult struct {
+	ListID   string `json:"list_id"`
+	ListName string `json:"list_name"`
+	UniqueID string `json:"unique_id"`
+	Part     string `json:"part"`
+	// Changed names the fields this call actually modified.
+	Changed []string      `json:"changed"`
+	Before  ListEntryView `json:"before"`
+	After   ListEntryView `json:"after"`
+	URL     string        `json:"url"`
+}
+
+// ListEntryView is the editable state of one line in a list.
+type ListEntryView struct {
+	Quantity            int    `json:"quantity"`
+	ReferenceDesignator string `json:"reference_designator,omitempty"`
+	CustomerReference   string `json:"customer_reference,omitempty"`
+	Notes               string `json:"notes,omitempty"`
+}
+
+func entryView(p digikey.RequestedPart) ListEntryView {
+	total := 0
+	for _, q := range p.Quantities {
+		total += q.Quantity
+	}
+	return ListEntryView{
+		Quantity:            total,
+		ReferenceDesignator: p.ReferenceDesignator,
+		CustomerReference:   p.CustomerReference,
+		Notes:               p.Notes,
+	}
+}
+
+func newListSetCommand(app *App) *cobra.Command {
+	var (
+		qty     int
+		ref     string
+		note    string
+		custRef string
+	)
+
+	cmd := &cobra.Command{
+		Use:     "set <list> <unique-id-or-part>",
+		Aliases: []string{"update", "edit"},
+		Short:   "Change the quantity or metadata of a part already in a list",
+		Long: `Edit a line that is already in a list, in place.
+
+  dk list set "Bench PSU rev A" 1276-1000-1-ND --qty 20
+  dk list set "Bench PSU rev A" 1276-1000-1-ND --ref C1-C20 --note "bulk decoupling"
+
+The part is identified the same way as in "dk list rm": by unique id or by any
+part number on the line. Unlike rm, an ambiguous match is an error rather than
+applying to every matching line.
+
+Only the flags you pass are changed; everything else on the line is preserved.
+This is a genuine edit, so the unique id survives — removing and re-adding would
+mint a new one and lose the reference designators and notes.`,
+		Args:              cobra.ExactArgs(2),
+		ValidArgsFunction: app.completeListNames,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			listRef, target := args[0], args[1]
+
+			if !cmd.Flags().Changed("qty") && ref == "" && note == "" && custRef == "" {
+				return usageErrorf("nothing to change; pass at least one of --qty, --ref, --note, or --customer-ref")
+			}
+			if cmd.Flags().Changed("qty") && qty < 1 {
+				return usageErrorf("--qty must be at least 1; use `dk list rm` to remove a part")
+			}
+
+			ctx := cmd.Context()
+			client, err := app.Client()
+			if err != nil {
+				return err
+			}
+			summary, err := client.ResolveList(ctx, listRef)
+			if err != nil {
+				return err
+			}
+
+			// Resolve the target against the fully-resolved parts, which carry
+			// every part number the user might have typed.
+			parts, err := client.ListParts(ctx, summary.ID, 0, 0, digikey.Locale{
+				Site:     app.Cfg.Locale.Site,
+				Language: app.Cfg.Locale.Language,
+				Currency: app.Cfg.Locale.Currency,
+			})
+			if err != nil {
+				return err
+			}
+			uniqueIDs := matchListEntries(parts.PartsList, target)
+			switch len(uniqueIDs) {
+			case 0:
+				return &Error{
+					Code:     CodeNotFound,
+					Message:  fmt.Sprintf("no part matching %q in list %q", target, summary.ListName),
+					Hint:     "Run `dk list show " + summary.ListName + "` to see what is in the list.",
+					ExitCode: ExitNotFound,
+				}
+			case 1:
+			default:
+				return usageErrorf("%q matches %d lines in %q; pass the unique id instead (see `dk list show --output json`)",
+					target, len(uniqueIDs), summary.ListName)
+			}
+			uniqueID := uniqueIDs[0]
+
+			// DigiKey's update is a replace, not a patch, so read the existing
+			// RequestedPart and modify it rather than sending a partial object.
+			full, err := client.GetList(ctx, summary.ID)
+			if err != nil {
+				return err
+			}
+			existing, ok := findRequestedPart(full.PartsList, uniqueID)
+			if !ok {
+				return &Error{
+					Code:     CodeNotFound,
+					Message:  fmt.Sprintf("list %q has no entry with unique id %s", summary.ListName, uniqueID),
+					ExitCode: ExitNotFound,
+				}
+			}
+
+			before := entryView(existing)
+			updated := existing
+			var changed []string
+
+			if cmd.Flags().Changed("qty") {
+				updated.Quantities = setQuantity(updated.Quantities, qty)
+				changed = append(changed, "quantity")
+			}
+			if ref != "" {
+				updated.ReferenceDesignator = ref
+				changed = append(changed, "reference_designator")
+			}
+			if custRef != "" {
+				updated.CustomerReference = custRef
+				changed = append(changed, "customer_reference")
+			}
+			if note != "" {
+				updated.Notes = note
+				changed = append(changed, "notes")
+			}
+
+			if err := client.UpdatePart(ctx, summary.ID, uniqueID, updated); err != nil {
+				return err
+			}
+
+			result := SetResult{
+				ListID:   summary.ID,
+				ListName: summary.ListName,
+				UniqueID: uniqueID,
+				Part:     target,
+				Changed:  changed,
+				Before:   before,
+				After:    entryView(updated),
+				URL:      listWebURLPrefix + summary.ID,
+			}
+
+			t := &output.Table{Headers: []string{"FIELD", "BEFORE", "AFTER"}}
+			t.AddRow("quantity", before.Quantity, result.After.Quantity)
+			t.AddRow("reference", before.ReferenceDesignator, result.After.ReferenceDesignator)
+			t.AddRow("customer ref", before.CustomerReference, result.After.CustomerReference)
+			t.AddRow("notes", before.Notes, result.After.Notes)
+			if err := app.Printer.Print(result, t); err != nil {
+				return err
+			}
+			app.Printer.PrintText("\nUpdated %s in %q.", target, summary.ListName)
+			return nil
+		},
+	}
+
+	f := cmd.Flags()
+	f.IntVar(&qty, "qty", 0, "new quantity")
+	f.StringVar(&ref, "ref", "", "new reference designators, e.g. \"C1,C2\"")
+	f.StringVar(&custRef, "customer-ref", "", "new customer reference")
+	f.StringVar(&note, "note", "", "new note")
+	return cmd
+}
+
+// findRequestedPart locates a list entry by unique id.
+func findRequestedPart(parts []digikey.RequestedPart, uniqueID string) (digikey.RequestedPart, bool) {
+	for _, p := range parts {
+		if strings.EqualFold(p.UniqueID, uniqueID) {
+			return p, true
+		}
+	}
+	return digikey.RequestedPart{}, false
+}
+
+// setQuantity replaces the quantity on a line, preserving the pack type that
+// was already selected. DigiKey allows several quantity lines per part; this
+// collapses them to one, which is what a caller asking for a single quantity
+// means.
+func setQuantity(existing []digikey.RequestedQuantity, qty int) []digikey.RequestedQuantity {
+	if len(existing) == 0 {
+		return []digikey.RequestedQuantity{{Quantity: qty}}
+	}
+	first := existing[0]
+	first.Quantity = qty
+	return []digikey.RequestedQuantity{first}
+}
+
+func newListCopyCommand(app *App) *cobra.Command {
+	var (
+		tags       []string
+		autoRename bool
+	)
+
+	cmd := &cobra.Command{
+		Use:     "copy <source-list> <new-name>",
+		Aliases: []string{"clone"},
+		Short:   "Copy a list to a new one",
+		Long: `Create a new list seeded from an existing one.
+
+  dk list copy "Bench PSU rev A" "Bench PSU rev B"
+
+Useful for iterating on a design without disturbing a BOM you have already
+reviewed. The copy is independent: editing it does not affect the source.`,
+		Args:              cobra.ExactArgs(2),
+		ValidArgsFunction: app.completeListNames,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			newName := strings.TrimSpace(args[1])
+			if newName == "" {
+				return usageErrorf("new list name must not be empty")
+			}
+
+			ctx := cmd.Context()
+			client, err := app.Client()
+			if err != nil {
+				return err
+			}
+			source, err := client.ResolveList(ctx, args[0])
+			if err != nil {
+				return err
+			}
+
+			if autoRename {
+				suggested, err := client.SuggestListName(ctx, newName)
+				if err != nil {
+					return err
+				}
+				if suggested != "" {
+					newName = suggested
+				}
+			}
+
+			id, err := client.CreateList(ctx, digikey.CreateListRequest{
+				ListName: newName,
+				Tags:     tags,
+				Source:   "external",
+				RefList:  &digikey.ReferenceList{ListID: source.ID},
+			})
+			if err != nil {
+				return err
+			}
+
+			view := ListView{ID: id, Name: newName, Tags: tags, URL: listWebURLPrefix + id}
+			t := &output.Table{Headers: []string{"NAME", "ID", "COPIED FROM", "URL"}}
+			t.AddRow(view.Name, view.ID, source.ListName, view.URL)
+			if err := app.Printer.Print(view, t); err != nil {
+				return err
+			}
+			app.Printer.PrintText("\nCopied %q to %q.", source.ListName, newName)
+			return nil
+		},
+	}
+
+	f := cmd.Flags()
+	f.StringSliceVar(&tags, "tag", nil, "tag to attach to the new list (repeatable)")
+	f.BoolVar(&autoRename, "auto-rename", false, "if the name is taken, let DigiKey pick the next free variant")
 	return cmd
 }
 

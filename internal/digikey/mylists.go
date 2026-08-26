@@ -47,6 +47,14 @@ type ListSettings struct {
 	AutoPopulateCref      *bool  `json:"AutoPopulateCref,omitempty"`
 }
 
+// ReferenceList points a new list at an existing one, which is how DigiKey
+// models cloning: the created list starts as a copy of RefList's contents.
+type ReferenceList struct {
+	ListID      string `json:"ListId,omitempty"`
+	IsGuestList bool   `json:"IsGuestList,omitempty"`
+	IsRevision  bool   `json:"IsRevision,omitempty"`
+}
+
 // CreateListRequest is the POST body for creating a list.
 type CreateListRequest struct {
 	ListName     string        `json:"ListName"`
@@ -54,6 +62,8 @@ type CreateListRequest struct {
 	Tags         []string      `json:"Tags,omitempty"`
 	Source       string        `json:"Source,omitempty"`
 	ListSettings *ListSettings `json:"ListSettings,omitempty"`
+	// RefList, when set, makes the new list a copy of an existing one.
+	RefList *ReferenceList `json:"RefList,omitempty"`
 }
 
 // RequestedQuantity is a quantity line on a requested part.

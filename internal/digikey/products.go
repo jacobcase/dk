@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -423,6 +424,206 @@ func (c *Client) Substitutions(ctx context.Context, partNumber string) (*Product
 	err := c.do(ctx, request{
 		method: "GET",
 		path:   productsBasePath + "/search/" + url.PathEscape(partNumber) + "/substitutions",
+		out:    &out,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ProductSummary is the compact product shape used by the association,
+// alternate-packaging, and recommendation responses.
+//
+// Note that UnitPrice is a preformatted string here, not a number as it is on
+// Product. DigiKey is inconsistent about this across endpoints.
+type ProductSummary struct {
+	ProductURL                string  `json:"ProductUrl"`
+	Description               string  `json:"Description"`
+	Manufacturer              NamedID `json:"Manufacturer"`
+	ManufacturerProductNumber string  `json:"ManufacturerProductNumber"`
+	UnitPrice                 string  `json:"UnitPrice"`
+	QuantityAvailable         int     `json:"QuantityAvailable"`
+	DigiKeyProductNumber      string  `json:"DigiKeyProductNumber"`
+}
+
+// ProductAssociations groups the products DigiKey relates to a part. Unlike
+// substitutes (which replace a part), these are products bought *alongside* it.
+type ProductAssociations struct {
+	// Kits are assortments that contain this product.
+	Kits []ProductSummary `json:"Kits"`
+	// MatingProducts are the other half of a connector pair.
+	MatingProducts []ProductSummary `json:"MatingProducts"`
+	// AssociatedProducts are accessories: crimpers, tools, hardware.
+	AssociatedProducts []ProductSummary `json:"AssociatedProducts"`
+	// ForUseWithProducts are products this one is intended to be used with.
+	ForUseWithProducts []ProductSummary `json:"ForUseWithProducts"`
+}
+
+// ProductAssociationsResponse is the /search/{productNumber}/associations result.
+type ProductAssociationsResponse struct {
+	ProductAssociations ProductAssociations `json:"ProductAssociations"`
+	SearchLocaleUsed    IsoSearchLocale     `json:"SearchLocaleUsed"`
+}
+
+// Associations returns the kits, mating halves, and accessories DigiKey relates
+// to a product. Works best with a DigiKey part number.
+func (c *Client) Associations(ctx context.Context, partNumber string) (*ProductAssociationsResponse, error) {
+	if strings.TrimSpace(partNumber) == "" {
+		return nil, fmt.Errorf("product number is required")
+	}
+	var out ProductAssociationsResponse
+	err := c.do(ctx, request{
+		method: "GET",
+		path:   productsBasePath + "/search/" + url.PathEscape(partNumber) + "/associations",
+		out:    &out,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// RecommendedProduct is one "customers also bought" suggestion.
+type RecommendedProduct struct {
+	DigiKeyProductNumber      string   `json:"DigiKeyProductNumber"`
+	ManufacturerProductNumber string   `json:"ManufacturerProductNumber"`
+	ManufacturerName          string   `json:"ManufacturerName"`
+	ProductDescription        string   `json:"ProductDescription"`
+	QuantityAvailable         int      `json:"QuantityAvailable"`
+	UnitPrice                 float64  `json:"UnitPrice"`
+	ProductURL                string   `json:"ProductUrl"`
+	PrimaryPhoto              string   `json:"PrimaryPhoto"`
+	OtherNames                []string `json:"OtherNames"`
+}
+
+// Recommendation groups recommendations for one requested product number.
+type Recommendation struct {
+	ProductNumber       string               `json:"ProductNumber"`
+	RecommendedProducts []RecommendedProduct `json:"RecommendedProducts"`
+	SearchLocaleUsed    IsoSearchLocale      `json:"SearchLocaleUsed"`
+}
+
+// RecommendedProductsResponse is the /search/{productNumber}/recommendedproducts result.
+type RecommendedProductsResponse struct {
+	Recommendations []Recommendation `json:"Recommendations"`
+}
+
+// RecommendedProducts returns products commonly bought with this one.
+func (c *Client) RecommendedProducts(ctx context.Context, partNumber string) ([]Recommendation, error) {
+	if strings.TrimSpace(partNumber) == "" {
+		return nil, fmt.Errorf("product number is required")
+	}
+	var out RecommendedProductsResponse
+	err := c.do(ctx, request{
+		method: "GET",
+		path:   productsBasePath + "/search/" + url.PathEscape(partNumber) + "/recommendedproducts",
+		out:    &out,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.Recommendations, nil
+}
+
+// AlternatePackagingResponse is the /search/{productNumber}/alternatepackaging
+// result. The doubly-nested shape is DigiKey's, not a modeling choice here.
+type AlternatePackagingResponse struct {
+	AlternatePackagings struct {
+		AlternatePackaging []ProductSummary `json:"AlternatePackaging"`
+	} `json:"AlternatePackagings"`
+	SearchLocaleUsed IsoSearchLocale `json:"SearchLocaleUsed"`
+}
+
+// AlternatePackaging returns the same part in other packaging options. This
+// overlaps Product.ProductVariations, but can surface separately-stocked part
+// numbers that are not listed as variations.
+func (c *Client) AlternatePackaging(ctx context.Context, partNumber string) ([]ProductSummary, error) {
+	if strings.TrimSpace(partNumber) == "" {
+		return nil, fmt.Errorf("product number is required")
+	}
+	var out AlternatePackagingResponse
+	err := c.do(ctx, request{
+		method: "GET",
+		path:   productsBasePath + "/search/" + url.PathEscape(partNumber) + "/alternatepackaging",
+		out:    &out,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.AlternatePackagings.AlternatePackaging, nil
+}
+
+// PackageTypeByQuantityProduct is one packaging option costed for a requested
+// quantity. RecommendedQuantity is what you would actually have to buy, which
+// can exceed the request when a minimum order quantity or standard pack forces
+// it up.
+type PackageTypeByQuantityProduct struct {
+	RecommendedQuantity        int          `json:"RecommendedQuantity"`
+	DigiKeyProductNumber       string       `json:"DigiKeyProductNumber"`
+	QuantityAvailable          int          `json:"QuantityAvailable"`
+	ProductDescription         string       `json:"ProductDescription"`
+	DetailedDescription        string       `json:"DetailedDescription"`
+	ManufacturerName           string       `json:"ManufacturerName"`
+	ManufacturerProductNumber  string       `json:"ManufacturerProductNumber"`
+	MinimumOrderQuantity       int          `json:"MinimumOrderQuantity"`
+	PrimaryDatasheetURL        string       `json:"PrimaryDatasheetUrl"`
+	ProductStatus              string       `json:"ProductStatus"`
+	ManufacturerLeadWeeks      string       `json:"ManufacturerLeadWeeks"`
+	RohsStatus                 string       `json:"RohsStatus"`
+	PackageType                NamedID      `json:"PackageType"`
+	MaxQuantityForDistribution int          `json:"MaxQuantityForDistribution"`
+	StandardPackage            int          `json:"StandardPackage"`
+	TariffActive               bool         `json:"TariffActive"`
+	QuantityOnOrder            int          `json:"QuantityOnOrder"`
+	StandardPricing            []PriceBreak `json:"StandardPricing"`
+	MyPricing                  []PriceBreak `json:"MyPricing"`
+	ProductURL                 string       `json:"ProductUrl"`
+	MarketPlace                bool         `json:"MarketPlace"`
+	Supplier                   string       `json:"Supplier"`
+	StockNote                  string       `json:"StockNote"`
+	PackageTypes               []string     `json:"PackageTypes"`
+}
+
+// Pricing returns the account-specific price breaks when a 3-legged token
+// produced them, otherwise the standard ones.
+func (p PackageTypeByQuantityProduct) Pricing() []PriceBreak {
+	if len(p.MyPricing) > 0 {
+		return p.MyPricing
+	}
+	return p.StandardPricing
+}
+
+// PackageTypeByQuantityResponse is the /search/packagetypebyquantity result.
+type PackageTypeByQuantityResponse struct {
+	Products      []PackageTypeByQuantityProduct `json:"Products"`
+	AccountIDUsed int                            `json:"AccountIdUsed"`
+}
+
+// PackageTypeByQuantity costs a product across its packaging options for a
+// requested quantity, so a caller can see what buying N would actually mean:
+// which part number to order, whether a minimum forces the quantity up, and
+// what it costs in each form.
+//
+// packagingPreference is optional; leave it empty for DigiKey's default.
+func (c *Client) PackageTypeByQuantity(ctx context.Context, partNumber string, requestedQuantity int, packagingPreference string) (*PackageTypeByQuantityResponse, error) {
+	if strings.TrimSpace(partNumber) == "" {
+		return nil, fmt.Errorf("product number is required")
+	}
+	if requestedQuantity < 1 {
+		return nil, fmt.Errorf("requested quantity must be at least 1")
+	}
+
+	q := url.Values{"requestedQuantity": {strconv.Itoa(requestedQuantity)}}
+	if packagingPreference != "" {
+		q.Set("packagingPreference", packagingPreference)
+	}
+
+	var out PackageTypeByQuantityResponse
+	err := c.do(ctx, request{
+		method: "GET",
+		path:   productsBasePath + "/search/packagetypebyquantity/" + url.PathEscape(partNumber),
+		query:  q,
 		out:    &out,
 	})
 	if err != nil {

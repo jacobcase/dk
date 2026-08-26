@@ -614,3 +614,146 @@ func TestMediaRejectsEmptyPartNumber(t *testing.T) {
 		t.Error("Media(\"\") error = nil, want a validation error")
 	}
 }
+
+func TestAssociationsDecodes(t *testing.T) {
+	client, cap := newTestClient(t, http.StatusOK, `{"ProductAssociations":{
+	  "MatingProducts":[{"DigiKeyProductNumber":"WM4300-ND","Description":"CONN HOUSING",
+	    "Manufacturer":{"Id":1,"Name":"Molex"},"UnitPrice":"$0.28","QuantityAvailable":15000}],
+	  "AssociatedProducts":[{"DigiKeyProductNumber":"TOOL-ND","Description":"CRIMP TOOL"}],
+	  "Kits":[],"ForUseWithProducts":[]}}`)
+
+	resp, err := client.Associations(context.Background(), "WM4200-ND")
+	if err != nil {
+		t.Fatalf("Associations() error = %v", err)
+	}
+	if len(resp.ProductAssociations.MatingProducts) != 1 {
+		t.Fatalf("mating products = %+v", resp.ProductAssociations.MatingProducts)
+	}
+	// UnitPrice is a preformatted string on ProductSummary, unlike Product.
+	if resp.ProductAssociations.MatingProducts[0].UnitPrice != "$0.28" {
+		t.Errorf("UnitPrice = %q", resp.ProductAssociations.MatingProducts[0].UnitPrice)
+	}
+	if cap.Path != "/products/v4/search/WM4200-ND/associations" {
+		t.Errorf("path = %q", cap.Path)
+	}
+}
+
+func TestAlternatePackagingUnwrapsDoubleNesting(t *testing.T) {
+	client, _ := newTestClient(t, http.StatusOK,
+		`{"AlternatePackagings":{"AlternatePackaging":[{"DigiKeyProductNumber":"ALT-ND"}]}}`)
+
+	packs, err := client.AlternatePackaging(context.Background(), "X")
+	if err != nil {
+		t.Fatalf("AlternatePackaging() error = %v", err)
+	}
+	if len(packs) != 1 || packs[0].DigiKeyProductNumber != "ALT-ND" {
+		t.Errorf("AlternatePackaging() = %+v", packs)
+	}
+}
+
+func TestRecommendedProductsDecodes(t *testing.T) {
+	client, _ := newTestClient(t, http.StatusOK,
+		`{"Recommendations":[{"ProductNumber":"X","RecommendedProducts":[
+		  {"DigiKeyProductNumber":"REC-ND","UnitPrice":1.25,"QuantityAvailable":5}]}]}`)
+
+	recs, err := client.RecommendedProducts(context.Background(), "X")
+	if err != nil {
+		t.Fatalf("RecommendedProducts() error = %v", err)
+	}
+	if len(recs) != 1 || len(recs[0].RecommendedProducts) != 1 {
+		t.Fatalf("Recommendations = %+v", recs)
+	}
+	// UnitPrice is numeric here, unlike ProductSummary.
+	if recs[0].RecommendedProducts[0].UnitPrice != 1.25 {
+		t.Errorf("UnitPrice = %v, want 1.25", recs[0].RecommendedProducts[0].UnitPrice)
+	}
+}
+
+func TestPackageTypeByQuantityQuery(t *testing.T) {
+	client, cap := newTestClient(t, http.StatusOK, `{"Products":[]}`)
+
+	if _, err := client.PackageTypeByQuantity(context.Background(), "X", 250, "CutTapeOrTR"); err != nil {
+		t.Fatalf("PackageTypeByQuantity() error = %v", err)
+	}
+	if cap.Path != "/products/v4/search/packagetypebyquantity/X" {
+		t.Errorf("path = %q", cap.Path)
+	}
+	if !strings.Contains(cap.Query, "requestedQuantity=250") {
+		t.Errorf("query = %q, want requestedQuantity=250", cap.Query)
+	}
+	if !strings.Contains(cap.Query, "packagingPreference=CutTapeOrTR") {
+		t.Errorf("query = %q, want the preference forwarded", cap.Query)
+	}
+}
+
+func TestPackageTypeByQuantityOmitsEmptyPreference(t *testing.T) {
+	client, cap := newTestClient(t, http.StatusOK, `{"Products":[]}`)
+	if _, err := client.PackageTypeByQuantity(context.Background(), "X", 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(cap.Query, "packagingPreference") {
+		t.Errorf("query = %q, want the preference omitted when unset", cap.Query)
+	}
+}
+
+func TestPackageTypeByQuantityValidatesQuantity(t *testing.T) {
+	client, _ := newTestClient(t, http.StatusOK, `{}`)
+	if _, err := client.PackageTypeByQuantity(context.Background(), "X", 0, ""); err == nil {
+		t.Error("PackageTypeByQuantity(qty=0) error = nil, want a validation error")
+	}
+}
+
+func TestPackageTypeByQuantityPricingPrefersMyPricing(t *testing.T) {
+	p := PackageTypeByQuantityProduct{
+		StandardPricing: []PriceBreak{{BreakQuantity: 1, UnitPrice: 1.0}},
+		MyPricing:       []PriceBreak{{BreakQuantity: 1, UnitPrice: 0.5}},
+	}
+	if got := p.Pricing(); len(got) != 1 || got[0].UnitPrice != 0.5 {
+		t.Errorf("Pricing() = %+v, want the account pricing", got)
+	}
+	standardOnly := PackageTypeByQuantityProduct{
+		StandardPricing: []PriceBreak{{BreakQuantity: 1, UnitPrice: 1.0}},
+	}
+	if got := standardOnly.Pricing(); len(got) != 1 || got[0].UnitPrice != 1.0 {
+		t.Errorf("Pricing() = %+v, want the standard pricing fallback", got)
+	}
+}
+
+func TestCreateListWithRefListSendsClone(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{
+		"POST /mylists/v1/lists": {http.StatusOK, `"new-id"`},
+	})
+
+	_, err := rc.CreateList(context.Background(), CreateListRequest{
+		ListName: "Copy",
+		RefList:  &ReferenceList{ListID: "source-id"},
+	})
+	if err != nil {
+		t.Fatalf("CreateList() error = %v", err)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rc.requests[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	refList, ok := body["RefList"].(map[string]any)
+	if !ok || refList["ListId"] != "source-id" {
+		t.Errorf("RefList = %v, want the source list id", body["RefList"])
+	}
+}
+
+func TestCreateListOmitsRefListWhenUnset(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{
+		"POST /mylists/v1/lists": {http.StatusOK, `"new-id"`},
+	})
+	if _, err := rc.CreateList(context.Background(), CreateListRequest{ListName: "Plain"}); err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rc.requests[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := body["RefList"]; present {
+		t.Error("RefList was sent on a plain create; an empty one may be rejected")
+	}
+}

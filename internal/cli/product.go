@@ -11,10 +11,12 @@ import (
 
 func newProductCommand(app *App) *cobra.Command {
 	var (
-		raw         bool
-		variations  bool
-		parameters  bool
-		substitutes bool
+		raw          bool
+		variations   bool
+		parameters   bool
+		substitutes  bool
+		recommended  bool
+		altPackaging bool
 	)
 
 	cmd := &cobra.Command{
@@ -43,7 +45,8 @@ so you can pick the right one for "dk list add".`,
 			// cobra validates flag groups after the pre-run hook, which would
 			// leave the failure classified as a runtime error instead of a
 			// usage error.
-			if err := exactlyOneOf(cmd, "variations", "parameters", "substitutes"); err != nil {
+			if err := exactlyOneOf(cmd, "variations", "parameters", "substitutes",
+				"recommended", "alternate-packaging"); err != nil {
 				return err
 			}
 
@@ -51,6 +54,28 @@ so you can pick the right one for "dk list add".`,
 			client, err := app.Client()
 			if err != nil {
 				return err
+			}
+
+			if recommended {
+				recs, err := client.RecommendedProducts(ctx, partNumber)
+				if err != nil {
+					return err
+				}
+				if raw {
+					return app.Printer.Print(recs, nil)
+				}
+				return app.Printer.Print(recs, recommendedTable(recs))
+			}
+
+			if altPackaging {
+				packs, err := client.AlternatePackaging(ctx, partNumber)
+				if err != nil {
+					return err
+				}
+				if raw {
+					return app.Printer.Print(packs, nil)
+				}
+				return app.Printer.Print(packs, summaryTable(packs, "PACKAGING OPTION"))
 			}
 
 			if substitutes {
@@ -111,6 +136,8 @@ so you can pick the right one for "dk list add".`,
 	f.BoolVar(&variations, "variations", false, "show every packaging variation and its DigiKey part number")
 	f.BoolVar(&parameters, "parameters", false, "show parametric attributes")
 	f.BoolVar(&substitutes, "substitutes", false, "show substitute parts instead of details")
+	f.BoolVar(&recommended, "recommended", false, "show products commonly bought with this one")
+	f.BoolVar(&altPackaging, "alternate-packaging", false, "show the same part in other packaging")
 	f.BoolVar(&raw, "raw", false, "emit DigiKey's unmodified response (implies --output json)")
 
 	return cmd
@@ -129,6 +156,47 @@ func exactlyOneOf(cmd *cobra.Command, names ...string) error {
 		return usageErrorf("%s cannot be combined; pick one (or use --output json, which returns all of them)", strings.Join(set, " and "))
 	}
 	return nil
+}
+
+// recommendedTable renders "customers also bought" suggestions.
+func recommendedTable(recs []digikey.Recommendation) *output.Table {
+	t := &output.Table{
+		Headers: []string{"DKPN", "MPN", "MFR", "DESCRIPTION", "STOCK", "UNIT"},
+		Empty:   "DigiKey has no recommendations for this product.",
+	}
+	for _, r := range recs {
+		for _, p := range r.RecommendedProducts {
+			t.AddRow(
+				p.DigiKeyProductNumber,
+				p.ManufacturerProductNumber,
+				output.Truncate(p.ManufacturerName, 20),
+				output.Truncate(p.ProductDescription, 40),
+				p.QuantityAvailable,
+				output.Money(p.UnitPrice),
+			)
+		}
+	}
+	return t
+}
+
+// summaryTable renders the compact ProductSummary shape shared by the
+// alternate-packaging and association responses.
+func summaryTable(items []digikey.ProductSummary, empty string) *output.Table {
+	t := &output.Table{
+		Headers: []string{"DKPN", "MPN", "MFR", "DESCRIPTION", "STOCK", "UNIT"},
+		Empty:   "No " + strings.ToLower(empty) + "s returned.",
+	}
+	for _, p := range items {
+		t.AddRow(
+			p.DigiKeyProductNumber,
+			p.ManufacturerProductNumber,
+			output.Truncate(p.Manufacturer.Name, 20),
+			output.Truncate(p.Description, 40),
+			p.QuantityAvailable,
+			p.UnitPrice,
+		)
+	}
+	return t
 }
 
 func variationsTable(variations []VariationView) *output.Table {
