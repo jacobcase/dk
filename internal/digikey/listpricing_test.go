@@ -1,6 +1,7 @@
 package digikey
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -756,5 +757,92 @@ func TestRealPricedListPartsResponse(t *testing.T) {
 	}
 	if got := un.ExtendedPrice(); got != 0 {
 		t.Errorf("ExtendedPrice() = %v, want 0", got)
+	}
+}
+
+// The fixtures above were written by hand. These two are real
+// /pricingbyquantity responses for 311-10.0KHRCT-ND, captured from the live API
+// at quantities 250 and 4500, and they pin three things the spec gets wrong or
+// does not say.
+func TestRealPricingByQuantityResponse(t *testing.T) {
+	load := func(name string) (PricingByQuantityResponse, []byte) {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join("testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got PricingByQuantityResponse
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		return got, raw
+	}
+
+	exact, exactRaw := load("pricingbyquantity_exact.json")
+	better, betterRaw := load("pricingbyquantity_bettervalue.json")
+
+	// 1. The spec documents QuantityAvailable on PricingOptionsForQuantity.
+	//    The live API sends it nowhere, at either quantity, which is why
+	//    `dk pricing` joins stock from ProductDetails instead of reading it
+	//    here. If this ever fails, DigiKey started sending it and the second
+	//    call may no longer be needed.
+	for name, raw := range map[string][]byte{
+		"pricingbyquantity_exact.json":       exactRaw,
+		"pricingbyquantity_bettervalue.json": betterRaw,
+	} {
+		if bytes.Contains(raw, []byte("QuantityAvailable")) {
+			t.Errorf("%s carries QuantityAvailable; stock no longer has to be joined", name)
+		}
+	}
+
+	// 2. MyPricingOptions comes back empty even though a 3-legged token made
+	//    the call (CustomerIdUsed is populated). An empty account-pricing array
+	//    is the normal case, not a sign the token was ignored.
+	if len(exact.MyPricingOptions) != 0 {
+		t.Errorf("MyPricingOptions = %+v, want the empty array the live call returned", exact.MyPricingOptions)
+	}
+	if exact.SettingsUsed.CustomerIDUsed == 0 {
+		t.Error("CustomerIdUsed is zero; the capture was supposed to be an authenticated call")
+	}
+	if got := exact.Options(); len(got) != 3 {
+		t.Fatalf("Options() returned %d options, want the 3 standard ones", len(got))
+	}
+
+	// 3. BetterValue buys MORE for LESS, which is the whole reason this
+	//    endpoint beats deriving a price from a break table: 5000 on a reel
+	//    costs less than the 4500 that was actually asked for.
+	var bestExact, betterValue *PricingOption
+	for i, o := range better.Options() {
+		switch o.PricingOption {
+		case "Exact":
+			if bestExact == nil || o.TotalPrice < bestExact.TotalPrice {
+				bestExact = &better.Options()[i]
+			}
+		case "BetterValue":
+			betterValue = &better.Options()[i]
+		}
+	}
+	if bestExact == nil || betterValue == nil {
+		t.Fatalf("want both an Exact and a BetterValue option, got %+v", better.Options())
+	}
+	if betterValue.TotalQuantityPriced <= bestExact.TotalQuantityPriced {
+		t.Errorf("BetterValue quantity %d is not more than Exact's %d",
+			betterValue.TotalQuantityPriced, bestExact.TotalQuantityPriced)
+	}
+	if betterValue.TotalPrice >= bestExact.TotalPrice {
+		t.Errorf("BetterValue total %v is not less than Exact's %v — nothing to surface",
+			betterValue.TotalPrice, bestExact.TotalPrice)
+	}
+	// Every product carries its own quantity and price, and the option's total
+	// is theirs summed. Reading one product's price as the option's cost is the
+	// mistake the nested shape exists to prevent.
+	for _, o := range better.Options() {
+		sum := 0.0
+		for _, p := range o.Products {
+			sum += p.ExtendedPrice
+		}
+		if diff := sum - o.TotalPrice; diff > 0.001 || diff < -0.001 {
+			t.Errorf("%s: products sum to %v, TotalPrice is %v", o.PricingOption, sum, o.TotalPrice)
+		}
 	}
 }

@@ -43,8 +43,8 @@ func TestDocumentedArraysAreNeverNullWhenEmpty(t *testing.T) {
 		},
 		{
 			name:  "pricing options",
-			route: "/products/v4/search/packagetypebyquantity/311-10.0KHRCT-ND",
-			body:  `{"Products":[]}`,
+			route: "/products/v4/search/311-10.0KHRCT-ND/pricingbyquantity/10",
+			body:  `{"MyPricingOptions":[],"StandardPricingOptions":[]}`,
 			args:  []string{"pricing", "311-10.0KHRCT-ND", "--qty", "10"},
 			key:   "options",
 		},
@@ -79,14 +79,15 @@ func TestDocumentedArraysAreNeverNullWhenEmpty(t *testing.T) {
 // entirely, so a caller testing `.best === null` would instead find undefined.
 func TestPricingBestKeyPresentWhenNothingInStock(t *testing.T) {
 	m := newMockDigiKey(t)
-	m.handle("GET", "/products/v4/search/packagetypebyquantity/311-10.0KHRCT-ND", http.StatusOK,
-		`{"Products":[{
-			"DigiKeyProductNumber":"311-10.0KHRCT-ND",
-			"PackageType":{"Id":2,"Name":"Cut Tape (CT)"},
-			"RecommendedQuantity":250,"MinimumOrderQuantity":1,
-			"QuantityAvailable":0,
-			"StandardPricing":[{"BreakQuantity":1,"UnitPrice":0.02,"TotalPrice":0.02}]
-		}]}`)
+	m.handle("GET", "/products/v4/search/311-10.0KHRCT-ND/pricingbyquantity/250", http.StatusOK,
+		`{"RequestedProduct":"311-10.0KHRCT-ND","RequestedQuantity":250,"MyPricingOptions":[],
+		  "StandardPricingOptions":[{"PricingOption":"Exact","TotalQuantityPriced":250,"TotalPrice":2.35,
+		    "Products":[{"DigiKeyProductNumber":"311-10.0KHRCT-ND","QuantityPriced":250,
+		      "MinimumOrderQuantity":1,"ExtendedPrice":2.35,"UnitPrice":0.0094,
+		      "PackageType":{"Id":2,"Name":"Cut Tape (CT)"}}]}]}`)
+	m.handle("GET", "/products/v4/search/311-10.0KHRCT-ND/productdetails", http.StatusOK,
+		`{"Product":{"ProductStatus":{"Status":"Active"},"ProductVariations":[
+		  {"DigiKeyProductNumber":"311-10.0KHRCT-ND","QuantityAvailableforPackageType":0}]}}`)
 
 	res := run(t, m, "pricing", "311-10.0KHRCT-ND", "--qty", "250")
 	if res.Code != ExitOK {

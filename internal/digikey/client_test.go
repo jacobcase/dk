@@ -709,53 +709,56 @@ func TestRecommendedProductsDecodes(t *testing.T) {
 	}
 }
 
-func TestPackageTypeByQuantityQuery(t *testing.T) {
-	client, cap := newTestClient(t, http.StatusOK, `{"Products":[]}`)
+func TestPricingByQuantityPath(t *testing.T) {
+	client, cap := newTestClient(t, http.StatusOK, `{"StandardPricingOptions":[]}`)
 
-	if _, err := client.PackageTypeByQuantity(context.Background(), "X", 250, "CutTapeOrTR"); err != nil {
-		t.Fatalf("PackageTypeByQuantity() error = %v", err)
+	if _, err := client.PricingByQuantity(context.Background(), "311-10.0KHRCT-ND", 250, 0); err != nil {
+		t.Fatalf("PricingByQuantity() error = %v", err)
 	}
-	if cap.Path != "/products/v4/search/packagetypebyquantity/X" {
-		t.Errorf("path = %q", cap.Path)
+	// The quantity is a path segment here, not a query parameter as it was on
+	// the endpoint this replaced.
+	if cap.Path != "/products/v4/search/311-10.0KHRCT-ND/pricingbyquantity/250" {
+		t.Errorf("path = %q, want the quantity in the path", cap.Path)
 	}
-	if !strings.Contains(cap.Query, "requestedQuantity=250") {
-		t.Errorf("query = %q, want requestedQuantity=250", cap.Query)
-	}
-	if !strings.Contains(cap.Query, "packagingPreference=CutTapeOrTR") {
-		t.Errorf("query = %q, want the preference forwarded", cap.Query)
+	if strings.Contains(cap.Query, "manufacturerId") {
+		t.Errorf("query = %q, want manufacturerId omitted when unset", cap.Query)
 	}
 }
 
-func TestPackageTypeByQuantityOmitsEmptyPreference(t *testing.T) {
-	client, cap := newTestClient(t, http.StatusOK, `{"Products":[]}`)
-	if _, err := client.PackageTypeByQuantity(context.Background(), "X", 1, ""); err != nil {
+func TestPricingByQuantitySendsManufacturerID(t *testing.T) {
+	client, cap := newTestClient(t, http.StatusOK, `{"StandardPricingOptions":[]}`)
+	// A manufacturer product number like CR2032 matches several manufacturers;
+	// this is the only way to say which one.
+	if _, err := client.PricingByQuantity(context.Background(), "CR2032", 5, 13); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(cap.Query, "packagingPreference") {
-		t.Errorf("query = %q, want the preference omitted when unset", cap.Query)
+	if !strings.Contains(cap.Query, "manufacturerId=13") {
+		t.Errorf("query = %q, want manufacturerId=13", cap.Query)
 	}
 }
 
-func TestPackageTypeByQuantityValidatesQuantity(t *testing.T) {
+func TestPricingByQuantityValidatesQuantity(t *testing.T) {
 	client, _ := newTestClient(t, http.StatusOK, `{}`)
-	if _, err := client.PackageTypeByQuantity(context.Background(), "X", 0, ""); err == nil {
-		t.Error("PackageTypeByQuantity(qty=0) error = nil, want a validation error")
+	if _, err := client.PricingByQuantity(context.Background(), "X", 0, 0); err == nil {
+		t.Error("PricingByQuantity(qty=0) error = nil, want a validation error")
 	}
 }
 
-func TestPackageTypeByQuantityPricingPrefersMyPricing(t *testing.T) {
-	p := PackageTypeByQuantityProduct{
-		StandardPricing: []PriceBreak{{BreakQuantity: 1, UnitPrice: 1.0}},
-		MyPricing:       []PriceBreak{{BreakQuantity: 1, UnitPrice: 0.5}},
+func TestPricingByQuantityPrefersAccountOptions(t *testing.T) {
+	r := PricingByQuantityResponse{
+		MyPricingOptions:       []PricingOption{{PricingOption: "Exact", TotalPrice: 1.0}},
+		StandardPricingOptions: []PricingOption{{PricingOption: "Exact", TotalPrice: 9.0}},
 	}
-	if got := p.Pricing(); len(got) != 1 || got[0].UnitPrice != 0.5 {
-		t.Errorf("Pricing() = %+v, want the account pricing", got)
+	if got := r.Options(); len(got) != 1 || got[0].TotalPrice != 1.0 {
+		t.Errorf("Options() = %+v, want the account pricing", got)
 	}
-	standardOnly := PackageTypeByQuantityProduct{
-		StandardPricing: []PriceBreak{{BreakQuantity: 1, UnitPrice: 1.0}},
+	// Empty MyPricingOptions is the normal case against the live API, even for
+	// an authenticated caller, so it must fall back rather than report nothing.
+	standardOnly := PricingByQuantityResponse{
+		StandardPricingOptions: []PricingOption{{PricingOption: "Exact", TotalPrice: 9.0}},
 	}
-	if got := standardOnly.Pricing(); len(got) != 1 || got[0].UnitPrice != 1.0 {
-		t.Errorf("Pricing() = %+v, want the standard pricing fallback", got)
+	if got := standardOnly.Options(); len(got) != 1 || got[0].TotalPrice != 9.0 {
+		t.Errorf("Options() = %+v, want the standard fallback", got)
 	}
 }
 

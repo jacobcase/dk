@@ -200,20 +200,45 @@ WHAT ELSE DO I NEED TO BUY?
 COSTING A QUANTITY
   dk pricing <part-number> --qty N [--packaging CT|DKR]
 
-  Answers "I need N of these — what do I order and what does it cost?" Prices
-  every packaging option for the requested quantity.
+  Answers "I need N of these — what do I order and what does it cost?" Returns
+  every way DigiKey will sell that quantity.
 
   JSON: {"part_number","requested_quantity","currency",
          "best":{...} | null,
-         "options":[{"digikey_part_number","packaging","order_quantity",
-                     "forced_up","minimum_order_quantity","unit_price",
-                     "extended_price","quantity_available","in_stock"}]}
+         "options":[{"option","order_quantity","forced_up","total_price",
+                     "in_stock",
+                     "products":[{"digikey_part_number","packaging","quantity",
+                                  "unit_price","extended_price",
+                                  "minimum_order_quantity","quantity_available",
+                                  "in_stock","product_status"}]}]}
 
-  Read .best first: the cheapest option that is actually in stock, or null if
-  none are. Read .forced_up before recommending anything — it is true when a
-  minimum order or standard pack forces order_quantity above what was asked
-  for. That is how a request for 250 becomes a 4000-piece reel. Always report
-  order_quantity and extended_price to the human, not just the unit price.
+  Read .best first: the cheapest option that is actually orderable, or null if
+  none are. Then read .forced_up — true when order_quantity exceeds what was
+  asked for. Always report order_quantity and total_price to the human, not
+  just a unit price.
+
+  .option is DigiKey's own label for the option, one of:
+    Exact                 buys exactly the requested quantity
+    MinimumOrderQuantity  a minimum forced the quantity up
+    BetterValue           costs LESS than the exact option while buying more
+    MaxOrderQuantity      capped above the requested quantity
+  BetterValue is worth surfacing unprompted: 5000 on a reel can cost less than
+  4500 on cut tape. Nothing you can compute from a single option produces it.
+
+  An option can hold SEVERAL products: a quantity past a standard reel is
+  filled with the reel plus a cut-tape remainder, priced as one option. Sum
+  .products[].quantity, or read .order_quantity, but never quote one product's
+  price as the option's cost. Every figure inside a product describes that
+  product only.
+
+  quantity_available and product_status are joined from the product record —
+  the pricing endpoint returns no stock — so dk makes two calls here. in_stock
+  on a product means its own line can be filled; on an option it means every
+  product in it can.
+
+  --packaging filters the returned options rather than asking DigiKey for a
+  preference. An option mixing a reel with a cut-tape remainder is not a CT
+  option and is filtered out of --packaging CT.
 
 DATASHEETS AND DOCUMENTS
   The primary datasheet URL is already in search and product output as

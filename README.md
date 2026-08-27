@@ -249,20 +249,28 @@ Details worth knowing:
 ## Buying the right quantity
 
 The same part number can be a trap: ask for 250 and a minimum order or standard
-pack can land you a 4000-piece reel.
+pack can land you a 5000-piece reel. Ask for 4500 and the reel is *cheaper*.
 
 ```
-$ dk pricing 311-10.0KHRCT-ND --qty 250
-DKPN                PACKAGING        ORDER QTY  FORCED-UP  UNIT    EXTENDED  STOCK  STATUS
-311-10.0KHRCT-ND    Cut Tape (CT)    250        false      0.0200  5.0000    50000  Active
-311-10.0KHRTR-ND    Tape & Reel (TR) 4000       true       0.0050  20.0000   12000  Active
+$ dk pricing 311-10.0KHRCT-ND --qty 4500
+OPTION         ORDER QTY  TOTAL    DKPN               PACKAGING         QTY   UNIT    STOCK    STATUS
+Exact          4500       29.7500  311-10.0KHRCT-ND   Cut Tape (CT)     4500  0.0066  4334182  Active
+Exact          4500       36.9000  311-10.0KHRDKR-ND  Digi-Reel®        4500  0.0082  4334182  Active
+BetterValue *  5000       23.4500  311-10.0KHRTR-ND   Tape & Reel (TR)  5000  0.0047  4333843  Active
 
-Cheapest in stock: 311-10.0KHRCT-ND (Cut Tape (CT)), order 250 for 5.0000 USD total.
+Cheapest in stock: 311-10.0KHRTR-ND (Tape & Reel (TR)), order 5000 for 23.4500 USD total.
+Note: this hands you 5000 units, not the 4500 requested.
 ```
 
-`FORCED-UP` is the column that matters. In JSON, read `.best` (cheapest option
-actually in stock, or `null`) and `.forced_up`. The `best` key is always
-present, so `null` is the "nothing in stock" signal.
+`OPTION` is DigiKey's own label: `Exact`, `MinimumOrderQuantity`,
+`BetterValue`, or `MaxOrderQuantity`. A `*` marks an option that hands you more
+than you asked for. In JSON, read `.best` (cheapest option actually orderable,
+or `null`) and `.forced_up`. The `best` key is always present, so `null` is the
+"nothing in stock" signal.
+
+One option can name several part numbers — a quantity past a standard reel is
+filled with the reel plus a cut-tape remainder, priced together — so each
+option carries a `products` array and the per-product figures live there.
 
 ## What else do I need to buy?
 

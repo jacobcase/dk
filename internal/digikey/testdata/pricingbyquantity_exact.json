@@ -1,0 +1,90 @@
+{
+  "RequestedProduct": "311-10.0KHRCT-ND",
+  "RequestedQuantity": 250,
+  "ProductUrl": "https://www.digikey.com/en/products/detail/yageo/RC0603FR-0710KL/726880",
+  "ManufacturerPartNumber": "RC0603FR-0710KL",
+  "Manufacturer": {
+    "Id": 13,
+    "Name": "YAGEO"
+  },
+  "Description": {
+    "ProductDescription": "RES 10K OHM 1% 1/10W 0603",
+    "DetailedDescription": "10 kOhms \u00b11% 0.1W, 1/10W Chip Resistor 0603 (1608 Metric) Moisture Resistant Thick Film"
+  },
+  "SettingsUsed": {
+    "SearchLocaleUsed": {
+      "Site": "US",
+      "Language": "en",
+      "Currency": "USD"
+    },
+    "CustomerIdUsed": 12885265
+  },
+  "MyPricingOptions": [],
+  "StandardPricingOptions": [
+    {
+      "PricingOption": "Exact",
+      "TotalQuantityPriced": 250,
+      "TotalPrice": 2.35,
+      "Products": [
+        {
+          "DigiKeyProductNumber": "311-10.0KHRCT-ND",
+          "QuantityPriced": 250,
+          "MinimumOrderQuantity": 1,
+          "ExtendedPrice": 2.35,
+          "UnitPrice": 0.0094,
+          "PackageType": {
+            "Id": 2,
+            "Name": "Cut Tape (CT)"
+          },
+          "TariffInformation": {
+            "TariffActive": true
+          }
+        }
+      ]
+    },
+    {
+      "PricingOption": "Exact",
+      "TotalQuantityPriced": 250,
+      "TotalPrice": 9.35,
+      "Products": [
+        {
+          "DigiKeyProductNumber": "311-10.0KHRDKR-ND",
+          "QuantityPriced": 250,
+          "MinimumOrderQuantity": 1,
+          "ExtendedPrice": 9.35,
+          "UnitPrice": 0.0374,
+          "PackageType": {
+            "Id": 243,
+            "Name": "Digi-Reel\u00ae"
+          },
+          "TariffInformation": {
+            "TariffActive": true
+          }
+        }
+      ]
+    },
+    {
+      "PricingOption": "MinimumOrderQuantity",
+      "TotalQuantityPriced": 5000,
+      "TotalPrice": 23.45,
+      "Products": [
+        {
+          "DigiKeyProductNumber": "311-10.0KHRTR-ND",
+          "QuantityPriced": 5000,
+          "MinimumOrderQuantity": 1,
+          "ExtendedPrice": 23.45,
+          "UnitPrice": 0.00469,
+          "PackageType": {
+            "Id": 1,
+            "Name": "Tape & Reel (TR)"
+          },
+          "TariffInformation": {
+            "TariffActive": true
+          }
+        }
+      ]
+    }
+  ],
+  "AccountIdUsed": 12885265,
+  "CustomerIdUsed": 12885265
+}

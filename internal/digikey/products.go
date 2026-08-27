@@ -669,59 +669,89 @@ func (c *Client) AlternatePackaging(ctx context.Context, partNumber string) ([]P
 	return out.AlternatePackagings.AlternatePackaging, nil
 }
 
-// PackageTypeByQuantityProduct is one packaging option costed for a requested
-// quantity. RecommendedQuantity is what you would actually have to buy, which
-// can exceed the request when a minimum order quantity or standard pack forces
-// it up.
-type PackageTypeByQuantityProduct struct {
-	RecommendedQuantity        int          `json:"RecommendedQuantity"`
-	DigiKeyProductNumber       string       `json:"DigiKeyProductNumber"`
-	QuantityAvailable          int          `json:"QuantityAvailable"`
-	ProductDescription         string       `json:"ProductDescription"`
-	DetailedDescription        string       `json:"DetailedDescription"`
-	ManufacturerName           string       `json:"ManufacturerName"`
-	ManufacturerProductNumber  string       `json:"ManufacturerProductNumber"`
-	MinimumOrderQuantity       int          `json:"MinimumOrderQuantity"`
-	PrimaryDatasheetURL        string       `json:"PrimaryDatasheetUrl"`
-	ProductStatus              string       `json:"ProductStatus"`
-	ManufacturerLeadWeeks      string       `json:"ManufacturerLeadWeeks"`
-	RohsStatus                 string       `json:"RohsStatus"`
-	PackageType                NamedID      `json:"PackageType"`
-	MaxQuantityForDistribution int          `json:"MaxQuantityForDistribution"`
-	StandardPackage            int          `json:"StandardPackage"`
-	TariffActive               bool         `json:"TariffActive"`
-	QuantityOnOrder            int          `json:"QuantityOnOrder"`
-	StandardPricing            []PriceBreak `json:"StandardPricing"`
-	MyPricing                  []PriceBreak `json:"MyPricing"`
-	ProductURL                 string       `json:"ProductUrl"`
-	MarketPlace                bool         `json:"MarketPlace"`
-	Supplier                   string       `json:"Supplier"`
-	StockNote                  string       `json:"StockNote"`
-	PackageTypes               []string     `json:"PackageTypes"`
+// PricingOptionProduct is one orderable product inside a pricing option. An
+// option can name several: DigiKey answers a quantity larger than a standard
+// reel with the reel plus a cut-tape remainder, and each half is priced here.
+type PricingOptionProduct struct {
+	DigiKeyProductNumber string  `json:"DigiKeyProductNumber"`
+	QuantityPriced       int     `json:"QuantityPriced"`
+	MinimumOrderQuantity int     `json:"MinimumOrderQuantity"`
+	ExtendedPrice        float64 `json:"ExtendedPrice"`
+	UnitPrice            float64 `json:"UnitPrice"`
+	PackageType          NamedID `json:"PackageType"`
+	TariffInformation    struct {
+		TariffActive bool `json:"TariffActive"`
+	} `json:"TariffInformation"`
+	MarketPlace bool `json:"Marketplace"`
 }
 
-// Pricing returns the account-specific price breaks when a 3-legged token
-// produced them, otherwise the standard ones.
-func (p PackageTypeByQuantityProduct) Pricing() []PriceBreak {
-	if len(p.MyPricing) > 0 {
-		return p.MyPricing
-	}
-	return p.StandardPricing
-}
-
-// PackageTypeByQuantityResponse is the /search/packagetypebyquantity result.
-type PackageTypeByQuantityResponse struct {
-	Products      []PackageTypeByQuantityProduct `json:"Products"`
-	AccountIDUsed int                            `json:"AccountIdUsed"`
-}
-
-// PackageTypeByQuantity costs a product across its packaging options for a
-// requested quantity, so a caller can see what buying N would actually mean:
-// which part number to order, whether a minimum forces the quantity up, and
-// what it costs in each form.
+// PricingOption is one way DigiKey will sell a requested quantity.
 //
-// packagingPreference is optional; leave it empty for DigiKey's default.
-func (c *Client) PackageTypeByQuantity(ctx context.Context, partNumber string, requestedQuantity int, packagingPreference string) (*PackageTypeByQuantityResponse, error) {
+// PricingOption (the field) is DigiKey's own classification, and it is the
+// reason this endpoint is worth more than a price: "Exact" buys what was asked
+// for, "MinimumOrderQuantity" is the quantity forced up by a minimum,
+// "BetterValue" costs less than the exact option while buying more, and
+// "MaxOrderQuantity" is capped above. Nothing derived locally can produce
+// BetterValue — it is a comparison across the whole option set.
+type PricingOption struct {
+	PricingOption       string                 `json:"PricingOption"`
+	TotalQuantityPriced int                    `json:"TotalQuantityPriced"`
+	TotalPrice          float64                `json:"TotalPrice"`
+	QuantityAvailable   int                    `json:"QuantityAvailable"`
+	Products            []PricingOptionProduct `json:"Products"`
+}
+
+// PriceSettingsUsed echoes what the API actually applied, which is the only
+// such signal on this response.
+type PriceSettingsUsed struct {
+	SearchLocaleUsed IsoSearchLocale `json:"SearchLocaleUsed"`
+	CustomerIDUsed   int             `json:"CustomerIdUsed"`
+}
+
+// PricingByQuantityResponse is the /pricingbyquantity result.
+type PricingByQuantityResponse struct {
+	RequestedProduct       string            `json:"RequestedProduct"`
+	RequestedQuantity      int               `json:"RequestedQuantity"`
+	ProductURL             string            `json:"ProductUrl"`
+	ManufacturerPartNumber string            `json:"ManufacturerPartNumber"`
+	Manufacturer           NamedID           `json:"Manufacturer"`
+	Description            Description       `json:"Description"`
+	SettingsUsed           PriceSettingsUsed `json:"SettingsUsed"`
+	MyPricingOptions       []PricingOption   `json:"MyPricingOptions"`
+	StandardPricingOptions []PricingOption   `json:"StandardPricingOptions"`
+	AccountIDUsed          int               `json:"AccountIdUsed"`
+	CustomerIDUsed         int               `json:"CustomerIdUsed"`
+}
+
+// Options returns the account-specific options when a 3-legged token produced
+// them, otherwise the standard ones. Same rule as ProductVariation pricing:
+// MyPricing wins when it exists, and against the live API it is routinely
+// empty even for an authenticated caller, so its absence is not an error.
+func (r PricingByQuantityResponse) Options() []PricingOption {
+	if len(r.MyPricingOptions) > 0 {
+		return r.MyPricingOptions
+	}
+	return r.StandardPricingOptions
+}
+
+// PricingByQuantity costs a product at a requested quantity, returning every
+// way DigiKey will sell it: the exact quantity, the quantity a minimum forces
+// it up to, and any option that costs less while buying more.
+//
+// This replaced /search/packagetypebyquantity, which DigiKey's own spec
+// deprecates in favor of it. The old endpoint returned one row per package type
+// with a price-break table and left the arithmetic — which quantity, at which
+// break, forced up or not — to the caller. Doing that arithmetic locally is how
+// a part number ends up beside a figure from a different variation.
+//
+// What it does not return, despite the spec documenting the field, is
+// QuantityAvailable: no response carries it at any quantity. Stock has to come
+// from ProductDetails, which covers every product an option can name, since
+// they are all variations of the same product.
+//
+// manufacturerID disambiguates a manufacturer part number that several
+// manufacturers use (CR2032 and the like); pass 0 for a DigiKey part number.
+func (c *Client) PricingByQuantity(ctx context.Context, partNumber string, requestedQuantity, manufacturerID int) (*PricingByQuantityResponse, error) {
 	if strings.TrimSpace(partNumber) == "" {
 		return nil, errors.New("product number is required")
 	}
@@ -729,15 +759,16 @@ func (c *Client) PackageTypeByQuantity(ctx context.Context, partNumber string, r
 		return nil, errors.New("requested quantity must be at least 1")
 	}
 
-	q := url.Values{"requestedQuantity": {strconv.Itoa(requestedQuantity)}}
-	if packagingPreference != "" {
-		q.Set("packagingPreference", packagingPreference)
+	q := url.Values{}
+	if manufacturerID > 0 {
+		q.Set("manufacturerId", strconv.Itoa(manufacturerID))
 	}
 
-	var out PackageTypeByQuantityResponse
+	var out PricingByQuantityResponse
 	err := c.do(ctx, request{
-		method:     "GET",
-		path:       productsBasePath + "/search/packagetypebyquantity/" + url.PathEscape(partNumber),
+		method: "GET",
+		path: productsBasePath + "/search/" + url.PathEscape(partNumber) +
+			"/pricingbyquantity/" + strconv.Itoa(requestedQuantity),
 		query:      q,
 		out:        &out,
 		cacheScope: ScopeProduct,

@@ -278,12 +278,54 @@ that they get written down rather than rediscovered.
 
 ## Endpoint coverage
 
-Product Information v4 is fully covered except `/pricing`, `/pricingbyquantity`,
-and `/digireelpricing`. Those are deliberate omissions: `ProductDetails` already
-returns `MyPricing` per variation, `packagetypebyquantity` returns strictly more
-than `pricingbyquantity`, and DigiReel is a custom-reel service irrelevant to
-this tool's purpose. Note that `dk pricing` wraps `packagetypebyquantity`, *not*
-the `/pricing` endpoint — the command is named for what it answers.
+Product Information v4 is fully covered except `/pricing`,
+`/packagetypebyquantity`, and `/digireelpricing`. Those are deliberate
+omissions: `ProductDetails` already returns `MyPricing` per variation, DigiReel
+is a custom-reel service irrelevant to this tool's purpose, and
+`packagetypebyquantity` is the endpoint DigiKey's own spec deprecates in favor
+of `pricingbyquantity`, which `dk pricing` now wraps. Note that `dk pricing`
+is not the `/pricing` endpoint — the command is named for what it answers.
+
+An earlier note here claimed `packagetypebyquantity` "returns strictly more
+than `pricingbyquantity`". That was wrong, and it is written down because it is
+the kind of claim that stops anyone re-checking. The two are not in a superset
+relation. The old one returns more *catalog metadata* (status, lead weeks,
+stock note, RoHS/REACH, datasheet) and a raw price-break table per package
+type. The new one returns more *pricing structure*, and the structure is the
+half `dk pricing` exists for:
+
+- **A pricing option can name several products.** DigiKey fills a quantity past
+  a standard reel with the reel plus a cut-tape remainder and prices them as
+  one option. The old endpoint's one-row-per-package-type shape could not say
+  that, which is why `PricingOption` in the view holds a `products` array and
+  carries no part number or unit price of its own — the same rule as pairing a
+  part number with its price, one level up.
+- **`PricingOption` is DigiKey's own classification**: `Exact`,
+  `MinimumOrderQuantity`, `BetterValue`, `MaxOrderQuantity`. `BetterValue` —
+  cheaper to buy *more* — cannot be derived from a single option, and dk could
+  not express it at all before. Live: 4500 on cut tape is $29.75, while 5000 on
+  a reel is $23.45.
+- **The arithmetic is DigiKey's, not dk's.** The old path picked
+  `RecommendedQuantity`, walked the break table for a unit price, and
+  multiplied. `TotalPrice` and per-product `ExtendedPrice` now come priced.
+
+**`pricingbyquantity` returns no stock, so `dk pricing` makes two calls.** The
+spec documents `QuantityAvailable` on `PricingOptionsForQuantity`; the live API
+never sends it, at any quantity, for any part tested. Stock and status are
+joined from `ProductDetails`, which is exactly one extra call however many
+options come back: every product an option can name is a variation of the same
+product. The lookup uses a DigiKey part number *from the pricing response*, not
+the caller's input — a manufacturer number can be ambiguous, a DigiKey one
+cannot. Without that join `dk pricing` cannot answer its own headline question,
+so a failed lookup fails the command rather than reporting everything as out of
+stock.
+
+Two live quirks worth knowing before touching this: `MyPricingOptions` comes
+back `[]` even under a 3-legged token on an account with no negotiated pricing,
+so its absence is normal and `Options()` falls back to
+`StandardPricingOptions`. And a discontinued zero-stock part (`18-880129-ND`)
+answers `500 NullReferenceException` where the old endpoint answered `400` with
+a readable message — the failure is not new, but it is worse-shaped.
 
 MyLists v1 is covered at both layers except `GetPartByUniqueId` and
 `validate/{name}`: the first is subsumed by `GetPartsByListId` (which `dk list
