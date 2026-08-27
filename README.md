@@ -1,6 +1,6 @@
 # dk — DigiKey CLI
 
-[![CI](https://github.com/jacobcase/dk/actions/workflows/ci.yml/badge.svg)](https://github.com/jacobcase/dk/actions/workflows/ci.yml)
+[![CI](https://github.com/jacobcase/dk/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/jacobcase/dk/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/jacobcase/dk/branch/master/graph/badge.svg)](https://codecov.io/gh/jacobcase/dk)
 
 A Go CLI for searching the DigiKey catalog and staging parts into DigiKey
