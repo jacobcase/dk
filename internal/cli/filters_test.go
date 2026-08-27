@@ -563,3 +563,35 @@ func TestFiltersParametersIsAlwaysAnArray(t *testing.T) {
 		t.Errorf("parameters = %s, want []", got)
 	}
 }
+
+func TestFiltersParameterValuesIsAlwaysAnArray(t *testing.T) {
+	// Same contract one level down. guide.go documents each parameter as
+	// carrying a "values" array, so a facet DigiKey returns with no
+	// FilterValues has to emit [] — a caller that just checked parameters was
+	// non-empty should not then find null inside it.
+	m := newMockDigiKey(t)
+	m.handle("POST", "/products/v4/search/keyword", http.StatusOK,
+		`{"ProductsCount":4210,"Products":[],"FilterOptions":{"ParametricFilters":[
+		  {"Category":{"Id":60,"Value":"Ceramic Capacitors"},
+		   "ParameterId":2049,"ParameterName":"Capacitance","ParameterType":"UnitOfMeasure",
+		   "FilterValues":[]}]}}`)
+
+	res := run(t, m, "filters", "0603 X7R ceramic capacitor")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+	var raw struct {
+		Parameters []map[string]json.RawMessage `json:"parameters"`
+	}
+	res.JSON(t, &raw)
+	if len(raw.Parameters) != 1 {
+		t.Fatalf("got %d parameters, want 1", len(raw.Parameters))
+	}
+	got, ok := raw.Parameters[0]["values"]
+	if !ok {
+		t.Fatal("parameter has no values key")
+	}
+	if string(got) != "[]" {
+		t.Errorf("values = %s, want []", got)
+	}
+}

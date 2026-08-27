@@ -307,7 +307,12 @@ mint a new one and lose the reference designators and notes.`,
 			var changed []string
 
 			if cmd.Flags().Changed("qty") {
-				updated.Quantities = setQuantity(updated.Quantities, qty)
+				updated.Quantities = setQuantity(updated.Quantities, updated.SelectedQuantityIndex, qty)
+				// setQuantity collapses Quantities to one entry, so the index
+				// that named the old selection now points past the end of the
+				// array it names. The update is a replace, not a patch: sending
+				// it back unchanged writes an out-of-range index.
+				updated.SelectedQuantityIndex = 0
 				changed = append(changed, "quantity")
 			}
 			if cmd.Flags().Changed("ref") {
@@ -369,17 +374,24 @@ func findRequestedPart(parts []digikey.RequestedPart, uniqueID string) (digikey.
 	return digikey.RequestedPart{}, false
 }
 
-// setQuantity replaces the quantity on a line, preserving the pack type that
-// was already selected. DigiKey allows several quantity lines per part; this
-// collapses them to one, which is what a caller asking for a single quantity
-// means.
-func setQuantity(existing []digikey.RequestedQuantity, qty int) []digikey.RequestedQuantity {
+// setQuantity replaces the quantity on a line, preserving the pack type of the
+// entry DigiKey had selected — Quantities[selected], not Quantities[0]. DigiKey
+// allows several quantity lines per part; this collapses them to one, which is
+// what a caller asking for a single quantity means.
+//
+// The caller must reset SelectedQuantityIndex alongside this. Collapsing the
+// array leaves any non-zero index naming an entry that no longer exists, and
+// DigiKey's update is a replace: the index goes back out exactly as it was read.
+func setQuantity(existing []digikey.RequestedQuantity, selected, qty int) []digikey.RequestedQuantity {
 	if len(existing) == 0 {
 		return []digikey.RequestedQuantity{{Quantity: qty}}
 	}
-	first := existing[0]
-	first.Quantity = qty
-	return []digikey.RequestedQuantity{first}
+	if selected < 0 || selected >= len(existing) {
+		selected = 0
+	}
+	keep := existing[selected]
+	keep.Quantity = qty
+	return []digikey.RequestedQuantity{keep}
 }
 
 func newListCopyCommand(app *App) *cobra.Command {

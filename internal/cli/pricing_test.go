@@ -236,3 +236,65 @@ func TestBuildPackagingOptionFallsBackWhenRecommendedQuantityMissing(t *testing.
 		t.Error("forced_up = false, but the minimum exceeds the request")
 	}
 }
+
+func TestPricingRejectsUnknownPackaging(t *testing.T) {
+	// packagingPreference has no enum in the spec, so DigiKey ignores a value
+	// it does not recognize and quietly prices the remainder at its default.
+	// A silently wrong quote is worse than a usage error, and "CutTapeOrTR" is
+	// the value dk itself documented before the flag was narrowed to CT|DKR.
+	tests := []struct {
+		name      string
+		packaging string
+		want      int
+	}{
+		{"documented cut tape", "CT", ExitOK},
+		{"documented digi-reel", "DKR", ExitOK},
+		{"lowercase is accepted", "ct", ExitOK},
+		{"empty means DigiKey's default", "", ExitOK},
+		{"the value dk used to document", "CutTapeOrTR", ExitUsage},
+		{"anything else", "reel", ExitUsage},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newMockDigiKey(t)
+			m.handle("GET", "/products/v4/search/packagetypebyquantity/X", http.StatusOK, packagingBody)
+
+			res := run(t, m, "pricing", "X", "--qty", "250", "--packaging", tc.packaging)
+			if res.Code != tc.want {
+				t.Fatalf("--packaging %q exit code = %d, want %d\nstderr: %s",
+					tc.packaging, res.Code, tc.want, res.Stderr)
+			}
+			if tc.want != ExitUsage {
+				return
+			}
+			// Rejected before the wire: a bad preference must not spend a
+			// request whose answer would be priced wrong anyway.
+			for _, r := range m.requests {
+				if strings.Contains(r.Path, "packagetypebyquantity") {
+					t.Errorf("a rejected --packaging still called the API: %s?%s", r.Path, r.Query)
+				}
+			}
+		})
+	}
+}
+
+func TestPricingForwardsCanonicalPackaging(t *testing.T) {
+	m := newMockDigiKey(t)
+	m.handle("GET", "/products/v4/search/packagetypebyquantity/X", http.StatusOK, packagingBody)
+
+	if res := run(t, m, "pricing", "X", "--qty", "250", "--packaging", "dkr"); res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+	var query string
+	for _, r := range m.requests {
+		if strings.Contains(r.Path, "packagetypebyquantity") {
+			query = r.Query
+		}
+	}
+	// DigiKey documents the values in upper case; send what it documents
+	// rather than what the shell happened to pass.
+	if !strings.Contains(query, "packagingPreference=DKR") {
+		t.Errorf("query = %q, want packagingPreference=DKR", query)
+	}
+}

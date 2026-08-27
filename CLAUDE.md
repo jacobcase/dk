@@ -58,12 +58,34 @@ Break these and the CLI stops being safe to drive from a program:
   agents. `ResolveList` handles it; an ambiguous name is an error, never a guess.
 
 - **Anything that needs a complete list pages for it.** `Lists`/`ListParts` are
-  single-page calls; `AllLists`/`AllListParts` page until a short page. A name
-  or part number on page two is otherwise indistinguishable from one that does
-  not exist, which turns into a false `not_found` for `list rm`/`list set` and,
-  worse, a silently truncated BOM out of `list export`. Only `list show` with an
-  explicit `--limit`/`--offset` reads a single page, and it reports `returned`
-  alongside `total_parts` so the difference is visible.
+  single-page calls; `AllLists`/`AllListParts` page until a request returns
+  nothing new — never merely until a short page. The spec gives `/lists` a limit
+  default of 50 and no maximum, so a request for 100 coming back short is the
+  expected first response, not an ending. A name or part number on page two is
+  otherwise indistinguishable from one that does not exist, which turns into a
+  false `not_found` for `list rm`/`list set` and, worse, a silently truncated
+  BOM out of `list export`. Only `list show` with an explicit
+  `--limit`/`--offset` reads a single page, and it reports `returned` alongside
+  `total_parts` so the difference is visible.
+
+  **A server that ignores `startIndex` is an error, not a short answer.** It can
+  never hand over the rest, so returning what was read is the truncation above
+  wearing a success. Neither walk can detect that by asking whether the page was
+  *full* — a server capped below the requested limit resends a short page
+  forever — and neither can call any non-empty repeat a failure: one that
+  *clamps* an out-of-range `startIndex` replies with a tail already held, and
+  that really is the end. Both compare where the batch starts: a repeat of page
+  one is the error. `AllLists` additionally requires the repeat to be at least
+  `listPageDefault` rows, because an account holding three lists answers every
+  `startIndex` with the same three; `AllListParts` needs no such threshold,
+  since `TotalParts` has already ended the walk for any list that fits in what
+  it holds. `TotalParts` cannot be the whole test either — it lags a delete, so
+  an *empty* page still ends the walk whatever the count claims.
+
+  This deliberately overturns the older reading that a short read was acceptable
+  because `TotalParts` left the shortfall visible next to `returned`. It is not
+  visible where it costs most: `list export` writes CSV, where `PrintText` is
+  suppressed, so the BOM is short and looks whole.
 
 - **Empty arrays serialize as `[]`, never `null`.** A documented array whose
   empty case is normal (`products`, `options`, `documents`, `parts`) is

@@ -223,6 +223,10 @@ func buildFiltersResult(keywords string, total int, facets digikey.FilterOptions
 			CategoryID:    pf.Category.ID,
 			CategoryName:  pf.Category.Value,
 			ValueCount:    len(pf.FilterValues),
+			// Documented as an array in the guide, so a parameter DigiKey
+			// returns with no values has to be [] rather than null — same
+			// reason as parameters above.
+			Values: []ParameterFacetValue{},
 		}
 		for _, v := range pf.FilterValues {
 			facet.Values = append(facet.Values, ParameterFacetValue{

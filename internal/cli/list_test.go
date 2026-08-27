@@ -1038,7 +1038,7 @@ func TestListCopyRejectsEmptyName(t *testing.T) {
 func TestSetQuantityPreservesPackType(t *testing.T) {
 	got := setQuantity([]digikey.RequestedQuantity{
 		{Quantity: 10, SelectedPackType: "Cut Tape", TargetPrice: 0.05},
-	}, 25)
+	}, 0, 25)
 	if len(got) != 1 {
 		t.Fatalf("got %d quantity lines, want 1", len(got))
 	}
@@ -1051,9 +1051,35 @@ func TestSetQuantityPreservesPackType(t *testing.T) {
 }
 
 func TestSetQuantityOnEmptyLine(t *testing.T) {
-	got := setQuantity(nil, 7)
+	got := setQuantity(nil, 0, 7)
 	if len(got) != 1 || got[0].Quantity != 7 {
-		t.Errorf("setQuantity(nil, 7) = %+v, want one line of 7", got)
+		t.Errorf("setQuantity(nil, 0, 7) = %+v, want one line of 7", got)
+	}
+}
+
+func TestSetQuantityKeepsTheSelectedLine(t *testing.T) {
+	existing := []digikey.RequestedQuantity{
+		{Quantity: 10, SelectedPackType: "CT"},
+		{Quantity: 25, SelectedPackType: "TR"},
+		{Quantity: 40, SelectedPackType: "DKR"},
+	}
+	// Quantities[0] is not necessarily the line DigiKey priced; collapsing to
+	// it would change the pack type as a side effect of a quantity edit.
+	got := setQuantity(existing, 2, 100)
+	if len(got) != 1 {
+		t.Fatalf("got %d quantity lines, want 1", len(got))
+	}
+	if got[0].SelectedPackType != "DKR" || got[0].Quantity != 100 {
+		t.Errorf("kept %+v, want the selected DKR line at quantity 100", got[0])
+	}
+
+	// An index DigiKey never sent, or one past the end, falls back to the first
+	// line rather than panicking on a list the user can see.
+	for _, bad := range []int{-1, 3, 99} {
+		got := setQuantity(existing, bad, 100)
+		if len(got) != 1 || got[0].SelectedPackType != "CT" {
+			t.Errorf("setQuantity(existing, %d, 100) = %+v, want a fallback to the first line", bad, got)
+		}
 	}
 }
 
@@ -1070,5 +1096,68 @@ func TestFindRequestedPart(t *testing.T) {
 	}
 	if _, ok := findRequestedPart(parts, "nope"); ok {
 		t.Error("findRequestedPart(nope) ok = true")
+	}
+}
+
+func TestListSetQuantityResetsTheSelectedIndex(t *testing.T) {
+	// DigiKey's update is a replace, so `dk list set` sends back the
+	// RequestedPart it read — including SelectedQuantityIndex. --qty collapses
+	// Quantities to a single entry, which leaves any non-zero index naming an
+	// entry that no longer exists. It has to be reset with the array, and the
+	// entry that survives has to be the one the index pointed at, or the line
+	// silently changes pack type along with its quantity.
+	m := newMockDigiKey(t)
+	m.handle("GET", "/mylists/v1/lists", http.StatusOK,
+		`[{"Id":"aaa-111","ListName":"Bench PSU rev A","TotalParts":1}]`)
+	m.handle("GET", "/mylists/v1/lists/aaa-111/parts", http.StatusOK,
+		`{"TotalParts":1,"PartsList":[{"UniqueId":"u1","DigiKeyPartNumber":"490-1532-1-ND"}]}`)
+	m.handle("GET", "/mylists/v1/lists/aaa-111", http.StatusOK,
+		`{"Id":"aaa-111","ListName":"Bench PSU rev A","PartsList":[
+		  {"UniqueId":"u1","RequestedPartNumber":"490-1532-1-ND","SelectedQuantityIndex":2,
+		   "Quantities":[
+		     {"Quantity":10,"SelectedPackType":"CT"},
+		     {"Quantity":25,"SelectedPackType":"TR"},
+		     {"Quantity":40,"SelectedPackType":"DKR"}]}]}`)
+	m.handle("PUT", "/mylists/v1/lists/aaa-111/parts/u1", http.StatusOK, ``)
+
+	res := runAuthed(t, m, "list", "set", "Bench PSU rev A", "490-1532-1-ND", "--qty", "100")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+
+	var sent struct {
+		SelectedQuantityIndex int `json:"SelectedQuantityIndex"`
+		Quantities            []struct {
+			Quantity         int    `json:"Quantity"`
+			SelectedPackType string `json:"SelectedPackType"`
+		} `json:"Quantities"`
+	}
+	var found bool
+	for _, r := range m.requests {
+		if r.Method == http.MethodPut {
+			found = true
+			if err := json.Unmarshal([]byte(r.Body), &sent); err != nil {
+				t.Fatalf("update body is not json: %v", err)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no update was sent")
+	}
+
+	if len(sent.Quantities) != 1 {
+		t.Fatalf("sent %d quantities, want 1", len(sent.Quantities))
+	}
+	if sent.SelectedQuantityIndex >= len(sent.Quantities) {
+		t.Errorf("SelectedQuantityIndex = %d with %d quantities sent: it names an entry that does not exist",
+			sent.SelectedQuantityIndex, len(sent.Quantities))
+	}
+	if sent.Quantities[0].Quantity != 100 {
+		t.Errorf("Quantity = %d, want 100", sent.Quantities[0].Quantity)
+	}
+	// Index 2 was Digi-Reel; keeping Quantities[0] would repack the line as CT.
+	if sent.Quantities[0].SelectedPackType != "DKR" {
+		t.Errorf("SelectedPackType = %q, want DKR — the pack type of the entry the index selected",
+			sent.Quantities[0].SelectedPackType)
 	}
 }

@@ -77,6 +77,16 @@ account-specific pricing is used instead of list pricing.`,
 			if quantity < 1 {
 				return usageErrorf("--qty must be at least 1")
 			}
+			// The spec gives packagingPreference no enum, so DigiKey ignores a
+			// value it does not recognize and prices the remainder at its
+			// default — a wrong quote with no error anywhere. CT and DKR are
+			// the only two it documents; empty still means "DigiKey's default".
+			preference = strings.ToUpper(strings.TrimSpace(preference))
+			switch preference {
+			case "", "CT", "DKR":
+			default:
+				return usageErrorf("--packaging must be CT (cut tape) or DKR (Digi-Reel), got %q", preference)
+			}
 
 			client, err := app.Client()
 			if err != nil {

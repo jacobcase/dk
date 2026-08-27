@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -465,11 +466,17 @@ func TestAllListPartsSurvivesServerSidePageCap(t *testing.T) {
 	}
 }
 
-// A server that ignores startIndex must not produce duplicates. The earlier
-// version of this test used a list that fit in one page, so it only proved the
-// loop terminated — not that the result was right.
-func TestAllListPartsDeduplicatesWhenServerIgnoresStartIndex(t *testing.T) {
-	const total = 250 // larger than one page, so the bug would show as triplication
+// A server that ignores startIndex cannot be paged, and a list larger than one
+// page therefore cannot be read completely. The earlier version of this test
+// asserted the opposite: it accepted 100 of 250 parts as a success, on the
+// argument that TotalParts left the shortfall visible to the caller. It is not
+// visible where it costs the most — `dk list export` writes CSV, and the
+// "showing N of M" line PrintText would emit goes to stderr and is suppressed
+// in CSV and JSON mode, so the BOM is short and looks complete. `list rm` and
+// `list set` resolve part numbers through this same call and would report a
+// part the user can see in the web UI as not found.
+func TestAllListPartsRejectsAServerThatIgnoresStartIndex(t *testing.T) {
+	const total = 250 // larger than one page, so the rest is genuinely missing
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
@@ -497,28 +504,59 @@ func TestAllListPartsDeduplicatesWhenServerIgnoresStartIndex(t *testing.T) {
 	}
 
 	got, err := client.AllListParts(context.Background(), "list-1", Locale{})
-	if err != nil {
-		t.Fatalf("AllListParts() error = %v", err)
+	if err == nil {
+		t.Fatalf("AllListParts() returned %d of %d parts and no error; a BOM missing everything "+
+			"past page one must not look like a complete one", len(got.PartsList), total)
 	}
-	if len(got.PartsList) != partsPageSize {
-		t.Fatalf("returned %d parts, want %d — the same page was accumulated more than once",
-			len(got.PartsList), partsPageSize)
+	if !strings.Contains(err.Error(), "startIndex") {
+		t.Errorf("error = %q, want it to name the cause (startIndex ignored)", err)
 	}
-	seen := map[string]bool{}
-	for _, p := range got.PartsList {
-		if seen[p.UniqueID] {
-			t.Fatalf("duplicate part %q in the result", p.UniqueID)
+	// It gives up on the repeated page rather than accumulating it to the cap.
+	if calls > 3 {
+		t.Errorf("made %d requests, want it to stop as soon as a page repeats", calls)
+	}
+}
+
+// A server that clamps an out-of-range startIndex answers the last request with
+// a tail already held. That is indistinguishable from the case above by row
+// count alone, and it really is the end of the list — erroring on it would fail
+// `list show` for a list whose length lands past the final page boundary.
+func TestAllListPartsAcceptsAClampedTailAsTheEnd(t *testing.T) {
+	const total = 150
+	const serverCap = 50
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		start, _ := strconv.Atoi(r.URL.Query().Get("startIndex"))
+		if start > total-serverCap {
+			start = total - serverCap // clamp rather than return nothing
 		}
-		seen[p.UniqueID] = true
+		end := min(start+serverCap, total)
+
+		// TotalParts lags high, so it cannot be what ends the walk: the caller
+		// has to survive a server whose count is stale after a delete.
+		_, _ = io.WriteString(w, `{"TotalParts":`+strconv.Itoa(total+5)+`,"PartsList":[`)
+		for i := start; i < end; i++ {
+			if i > start {
+				_, _ = io.WriteString(w, ",")
+			}
+			_, _ = fmt.Fprintf(w, `{"UniqueId":"uid-%d"}`, i)
+		}
+		_, _ = io.WriteString(w, `]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := New(Options{BaseURL: srv.URL, ClientID: "cid", Tokens: &staticTokens{user: "t"}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	// TotalParts keeps the server's claim of 250 rather than being clamped to
-	// what we managed to fetch. That is deliberate: the discrepancy between
-	// TotalParts and the returned count is the only signal the caller has that
-	// the server short-changed us, and `dk list show` surfaces it as
-	// "Showing 100 of 250 parts". Clamping would hide a broken server.
-	if got.TotalParts != total {
-		t.Errorf("TotalParts = %d, want %d — the shortfall must stay visible to the caller",
-			got.TotalParts, total)
+
+	got, err := client.AllListParts(context.Background(), "list-1", Locale{})
+	if err != nil {
+		t.Fatalf("AllListParts() error = %v against a server that clamps startIndex", err)
+	}
+	if len(got.PartsList) != total {
+		t.Fatalf("returned %d parts, want all %d", len(got.PartsList), total)
 	}
 }
 

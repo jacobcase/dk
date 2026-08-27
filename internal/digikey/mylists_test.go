@@ -744,3 +744,102 @@ func TestSuggestListNameDoesNotGuessOnOtherErrors(t *testing.T) {
 		t.Error("SuggestListName() error = nil on a 429, want the error propagated")
 	}
 }
+
+func TestAllListsRejectsAServerThatResendsACappedPage(t *testing.T) {
+	// The guard this replaces asked whether the page came back full. The spec
+	// documents a limit *default* of 50 and no maximum, so a server that caps
+	// below listPageSize and ignores startIndex resends 50 rows forever and
+	// never trips that test: the walk returned the first 50 lists and reported
+	// them as the complete set, which is a false not_found for every name past
+	// them — on `list rm` and `list set` as much as on `list show`.
+	const serverCap = 50
+
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/oauth2/token" {
+			_, _ = io.WriteString(w, `{"access_token":"tok","expires_in":1800}`)
+			return
+		}
+		requests++
+		// startIndex ignored: always page one, always short of what was asked.
+		var b strings.Builder
+		b.WriteString("[")
+		for i := range serverCap {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, `{"Id":"id-%d","ListName":"List %d"}`, i, i)
+		}
+		b.WriteString("]")
+		_, _ = io.WriteString(w, b.String())
+	}))
+	defer srv.Close()
+
+	c, err := New(Options{BaseURL: srv.URL, ClientID: "id", Tokens: &staticTokens{app: "a", user: "u"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := c.AllLists(context.Background())
+	if err == nil {
+		t.Fatalf("AllLists() returned %d lists and no error against a server that ignores startIndex; "+
+			"a truncated listing that looks complete is the failure this guards", len(all))
+	}
+	if !strings.Contains(err.Error(), "startIndex") {
+		t.Errorf("error = %q, want it to name the cause (startIndex ignored)", err)
+	}
+	// It gives up on the repeat, not after maxListPages requests.
+	if requests > 3 {
+		t.Errorf("made %d requests, want it to stop as soon as a page repeats", requests)
+	}
+	if strings.Contains(err.Error(), strconv.Itoa(maxListPages)) {
+		t.Errorf("error = %q, but the walk never made %d requests", err, maxListPages)
+	}
+}
+
+func TestAllListsAcceptsAClampedTailAsTheEnd(t *testing.T) {
+	// A server that clamps an out-of-range startIndex to the last page answers
+	// with rows we already hold — indistinguishable from a non-paging server by
+	// row count alone, and the reason the check is "does this batch start where
+	// page one starts" rather than "is this batch non-empty". This one really
+	// is the end, and erroring here would fail every list command outright.
+	const total = 120
+	const serverCap = 50
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/oauth2/token" {
+			_, _ = io.WriteString(w, `{"access_token":"tok","expires_in":1800}`)
+			return
+		}
+		start, _ := strconv.Atoi(r.URL.Query().Get("startIndex"))
+		if start > total-serverCap {
+			start = total - serverCap // clamp instead of returning nothing
+		}
+		end := min(start+serverCap, total)
+
+		var b strings.Builder
+		b.WriteString("[")
+		for i := start; i < end; i++ {
+			if i > start {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, `{"Id":"id-%d","ListName":"List %d"}`, i, i)
+		}
+		b.WriteString("]")
+		_, _ = io.WriteString(w, b.String())
+	}))
+	defer srv.Close()
+
+	c, err := New(Options{BaseURL: srv.URL, ClientID: "id", Tokens: &staticTokens{app: "a", user: "u"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := c.AllLists(context.Background())
+	if err != nil {
+		t.Fatalf("AllLists() error = %v against a server that clamps startIndex", err)
+	}
+	if len(all) != total {
+		t.Fatalf("AllLists() returned %d lists, want all %d", len(all), total)
+	}
+}

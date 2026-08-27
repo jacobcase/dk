@@ -326,14 +326,18 @@ func (c *Client) Lists(ctx context.Context, startIndex, limit int) ([]ListSummar
 	return out, nil
 }
 
-// Paging bounds for AllLists. The spec documents /lists as defaulting to 50 per
-// page, so asking for listPageSize is asking for more than DigiKey promises;
-// the loop below therefore cannot treat a short page as the end. maxListPages
-// guards against a server that ignores startIndex and would otherwise make the
-// loop run forever.
+// Paging bounds for AllLists. The spec gives /lists a limit default of 50 and
+// documents no maximum, so asking for listPageSize is asking for more than
+// DigiKey promises; the loop below therefore cannot treat a short page as the
+// end, nor treat a full one as proof the server is paging. maxListPages guards
+// against a server that ignores startIndex and would otherwise loop forever.
 const (
 	listPageSize = 100
-	maxListPages = 500
+	// listPageDefault is the limit default the spec documents for /lists, and
+	// the only page size it names. A repeated page at least this big is a
+	// server paging in place; a smaller one is just a small account.
+	listPageDefault = 50
+	maxListPages    = 500
 )
 
 // AllLists returns every list the account owns. Resolving a list by name needs
@@ -346,7 +350,7 @@ func (c *Client) AllLists(ctx context.Context) ([]ListSummary, error) {
 
 	for range maxListPages {
 		// Resume from what we actually hold rather than from page*pageSize, and
-		// do not stop on a short page. DigiKey documents /lists as 50 per page
+		// do not stop on a short page. The spec defaults /lists to 50 per page
 		// while this asks for 100, so the very first response is expected to be
 		// "short" — treating that as the end would return the first 50 lists and
 		// report them as complete. Same reasoning as AllListParts below.
@@ -370,14 +374,31 @@ func (c *Client) AllLists(ctx context.Context) ([]ListSummary, error) {
 			added++
 		}
 
-		// A page that added nothing new ends the walk — but only if it was not
-		// a full page. A *full* page of rows we already hold means the server
-		// ignored startIndex and is resending page one; returning there would
-		// silently truncate, which is the failure this function exists to
-		// prevent, so it is an error instead.
+		// A page that added nothing new ends the walk — unless it is page one
+		// again, which means the server ignored startIndex and the walk cannot
+		// reach whatever lies past it. Returning there would silently truncate,
+		// which is the failure this function exists to prevent, so it is an
+		// error instead.
+		//
+		// The test cannot be "was the page full": the spec documents a page
+		// size default, not a cap, so a server capped below listPageSize
+		// resends its short page forever and never trips that. Nor can it be
+		// "was the page non-empty" — an account holding three lists answers
+		// every startIndex with the same three, and erroring there would break
+		// every list command for most users. Two things separate a server
+		// paging in place from one that has simply run out: the batch starts
+		// where page one starts (a server clamping an out-of-range startIndex
+		// returns the tail instead, and that really is the end), and it is at
+		// least as big as the page size the spec documents (below that it
+		// cannot be a cap). An account whose list count lands exactly on a
+		// clamping server's page boundary still trips this; that is a loud
+		// error in an edge no spec describes, which is the trade this whole
+		// function is: never a listing that is short and looks complete.
 		if added == 0 {
-			if len(batch) == listPageSize {
-				break
+			if len(batch) >= listPageDefault && len(all) > 0 && batch[0].ID == all[0].ID {
+				return nil, fmt.Errorf(
+					"digikey ignored startIndex while paging lists: the request at index %d resent the first page (%d lists)",
+					len(all), len(batch))
 			}
 			return all, nil
 		}
@@ -574,8 +595,9 @@ const (
 	maxPartPages  = 500
 )
 
-// AllListParts returns every part in a list, paging until DigiKey returns a
-// short page.
+// AllListParts returns every part in a list, paging until it holds the count
+// DigiKey reports or the server runs out of rows — never merely until a short
+// page.
 //
 // The same argument as AllLists applies, and costs more here: a part on page
 // two is indistinguishable from one that is absent, so `dk list rm` would
@@ -616,9 +638,34 @@ func (c *Client) AllListParts(ctx context.Context, listID string, locale Locale)
 			added++
 		}
 
-		// No new rows means the list ended, or the server is not paging at all.
-		// Either way there is nothing further to fetch.
-		if added == 0 || (all.TotalParts > 0 && len(all.PartsList) >= all.TotalParts) {
+		// Holding the count DigiKey itself reports ends the walk, whatever the
+		// next page would have said.
+		if all.TotalParts > 0 && len(all.PartsList) >= all.TotalParts {
+			done = true
+			break
+		}
+
+		// Nothing new, and TotalParts says rows are missing. An empty page is
+		// still the end: TotalParts can lag a delete, so it is no evidence the
+		// server has rows left to give. A non-empty page that begins where page
+		// one begins is different — the server is ignoring startIndex and will
+		// never hand over the rest, so returning here would write a BOM missing
+		// everything past the first page while TotalParts still reported the
+		// full count. That is the exact failure this function exists to
+		// prevent, so it is an error. Anything else is a tail already held,
+		// which is what a server clamping an out-of-range startIndex returns,
+		// and that really is the end.
+		//
+		// Unlike AllLists, no page-size heuristic is needed to tell a small
+		// list from a capped one: the check above already ended the walk for
+		// any list that fits in what we hold.
+		if added == 0 {
+			if len(batch.PartsList) > 0 && len(all.PartsList) > 0 &&
+				batch.PartsList[0].UniqueID == all.PartsList[0].UniqueID {
+				return nil, fmt.Errorf(
+					"digikey ignored startIndex while paging list %s: the request at index %d resent the first page (%d parts of %d)",
+					listID, len(all.PartsList), len(all.PartsList), all.TotalParts)
+			}
 			done = true
 			break
 		}
