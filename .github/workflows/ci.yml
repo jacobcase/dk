@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
 
 permissions:
@@ -40,7 +40,17 @@ jobs:
 
       # -race catches the token store and printer being shared across
       # goroutines; -cover keeps the number visible in the log.
-      - run: go test -race -cover ./...
+      - run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      # The badge in the README reads from here; without an upload it would
+      # sit at "unknown" forever.
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.out
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
       - run: go build ./...
 
