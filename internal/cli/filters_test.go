@@ -539,3 +539,27 @@ func TestFiltersRejectsBadValuesFlag(t *testing.T) {
 		t.Errorf("exit code = %d, want %d", res.Code, ExitUsage)
 	}
 }
+
+func TestFiltersParametersIsAlwaysAnArray(t *testing.T) {
+	// DigiKey omits ParametricFilters whenever the result set does not resolve
+	// to a single category, which a broad query does routinely. guide.go
+	// documents parameters as an array, so the empty case must be [] and never
+	// null -- a caller testing len() on it should not have to handle both.
+	m := newMockDigiKey(t)
+	m.handle("POST", "/products/v4/search/keyword", http.StatusOK,
+		`{"ProductsCount":23739,"Products":[],"FilterOptions":{"Manufacturers":[{"Id":399,"Value":"KEMET","ProductCount":5615}]}}`)
+
+	res := run(t, m, "filters", "0603 X7R ceramic capacitor")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+	var raw map[string]json.RawMessage
+	res.JSON(t, &raw)
+	got, ok := raw["parameters"]
+	if !ok {
+		t.Fatal("filters JSON has no parameters key")
+	}
+	if string(got) != "[]" {
+		t.Errorf("parameters = %s, want []", got)
+	}
+}

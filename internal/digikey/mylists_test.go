@@ -685,3 +685,62 @@ func TestRequestedPartRoundTripsEverySpecField(t *testing.T) {
 		}
 	}
 }
+
+func TestSuggestListNameFallsBackWhenDigiKeyLacksTheRoute(t *testing.T) {
+	// DigiKey answers the documented validate route with 404 "Invalid resource
+	// path", which used to fail --auto-rename outright. The fallback derives a
+	// free name from the account's own lists instead.
+	rc := newRoutedClient(t, map[string]route{
+		"GET /mylists/v1/lists/validate/name/Bench PSU": {
+			status: http.StatusNotFound,
+			body:   `{"ErrorMessage":"Invalid resource path (Requested resource is not available)"}`,
+		},
+		"GET /mylists/v1/lists": {status: http.StatusOK, body: `[
+		  {"Id":"a","ListName":"Bench PSU"},
+		  {"Id":"b","ListName":"bench psu (2)"},
+		  {"Id":"c","ListName":"Unrelated"}
+		]`},
+	})
+
+	got, err := rc.SuggestListName(context.Background(), "Bench PSU")
+	if err != nil {
+		t.Fatalf("SuggestListName() error = %v, want the local fallback to answer", err)
+	}
+	// (2) is taken case-insensitively, so the next free variant is (3).
+	if got != "Bench PSU (3)" {
+		t.Errorf("SuggestListName() = %q, want \"Bench PSU (3)\"", got)
+	}
+}
+
+func TestSuggestListNameFallbackKeepsAFreeName(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{
+		"GET /mylists/v1/lists/validate/name/Fresh": {
+			status: http.StatusNotFound,
+			body:   `{"ErrorMessage":"Invalid resource path"}`,
+		},
+		"GET /mylists/v1/lists": {status: http.StatusOK, body: `[{"Id":"a","ListName":"Something Else"}]`},
+	})
+
+	got, err := rc.SuggestListName(context.Background(), "Fresh")
+	if err != nil {
+		t.Fatalf("SuggestListName() error = %v", err)
+	}
+	if got != "Fresh" {
+		t.Errorf("SuggestListName() = %q, want the original name back untouched", got)
+	}
+}
+
+func TestSuggestListNameDoesNotGuessOnOtherErrors(t *testing.T) {
+	// A 429 says nothing about whether the name is taken. Inventing one from a
+	// listing dk could not read would be a guess, so the error propagates.
+	rc := newRoutedClient(t, map[string]route{
+		"GET /mylists/v1/lists/validate/name/Bench PSU": {
+			status: http.StatusTooManyRequests,
+			body:   `{"ErrorMessage":"slow down"}`,
+		},
+	})
+
+	if _, err := rc.SuggestListName(context.Background(), "Bench PSU"); err == nil {
+		t.Error("SuggestListName() error = nil on a 429, want the error propagated")
+	}
+}

@@ -456,6 +456,14 @@ func (c *Client) RenameList(ctx context.Context, listID, newName string) error {
 }
 
 // SuggestListName returns name if it is free, or a de-duplicated variant.
+//
+// MyLists v1 documents /lists/validate/name/{listName} for this, but DigiKey
+// answers it with 404 "Invalid resource path" — the route is in the spec and
+// not on the server. Rather than fail --auto-rename on an endpoint that does
+// not exist, a 404 falls back to deriving a free name from the account's own
+// lists. Every other error is returned: a 401 or a 429 says nothing about
+// whether the name is taken, and inventing one from a listing dk could not
+// read would be a guess.
 func (c *Client) SuggestListName(ctx context.Context, name string) (string, error) {
 	if strings.TrimSpace(name) == "" {
 		return "", errors.New("list name is required")
@@ -471,10 +479,45 @@ func (c *Client) SuggestListName(ctx context.Context, name string) (string, erro
 		// reply from ten minutes ago would hand back a name that has since been
 		// taken, which is the one thing this call exists to prevent.
 	})
-	if err != nil {
+	if err == nil {
+		return suggested, nil
+	}
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || !apiErr.NotFound() {
 		return "", err
 	}
-	return suggested, nil
+	return c.suggestListNameLocally(ctx, name)
+}
+
+// suggestListNameLocally picks the first free "name (n)" by reading the
+// account's lists. It is the fallback for DigiKey's missing validate route.
+//
+// The listing is read through Live so the names it compares against are
+// current: --auto-rename exists to avoid colliding with a list that already
+// exists, and a cached listing is exactly how it would collide anyway.
+func (c *Client) suggestListNameLocally(ctx context.Context, name string) (string, error) {
+	lists, err := c.AllLists(Live(ctx))
+	if err != nil {
+		return "", fmt.Errorf("suggest a free list name: %w", err)
+	}
+
+	taken := make(map[string]bool, len(lists))
+	for _, l := range lists {
+		taken[strings.ToLower(strings.TrimSpace(l.ListName))] = true
+	}
+	if !taken[strings.ToLower(name)] {
+		return name, nil
+	}
+	// Bounded by the number of lists plus one: with n lists, at most n of the
+	// candidates can be taken, so one of the first n+1 is always free.
+	for i := 2; i <= len(lists)+2; i++ {
+		candidate := fmt.Sprintf("%s (%d)", name, i)
+		if !taken[strings.ToLower(candidate)] {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("no free variant of list name %q", name)
 }
 
 // listPartsQuery builds the parts-endpoint query. Unlike the rest of MyLists,

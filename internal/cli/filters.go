@@ -186,8 +186,14 @@ func discoverFacets(ctx context.Context, client *digikey.Client, keywords, categ
 // buildFiltersResult converts DigiKey's facet payload into dk's view.
 func buildFiltersResult(keywords string, total int, facets digikey.FilterOptions) FiltersResult {
 	result := FiltersResult{
-		Query:         keywords,
-		TotalMatches:  total,
+		Query:        keywords,
+		TotalMatches: total,
+		// Initialized rather than left nil: guide.go documents parameters as an
+		// array, and DigiKey omits parametric facets whenever the result set
+		// does not resolve to one category — a 23,000-match query for "0603 X7R
+		// ceramic capacitor" is enough to hit it. That empty case is normal, so
+		// it has to serialize as [] rather than null.
+		Parameters:    []ParameterFacet{},
 		Manufacturers: baseFacets(facets.Manufacturers),
 		Packaging:     baseFacets(facets.Packaging),
 		Status:        baseFacets(facets.Status),

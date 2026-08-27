@@ -229,6 +229,31 @@ same mistake:
 The rule: whenever a view reports an identifier and a figure side by side, both
 must come from the same variation or pack option.
 
+## Settled against the live API — do not reopen
+
+Two fields look like they should be modeled and are not. Both were tested
+against the real API on 2026-08-27; the answers are counterintuitive enough
+that they get written down rather than rediscovered.
+
+- **`ListPartQuantity.IsInactive` must not gate pricing.** The obvious reading
+  — an inactive line should not count toward `estimated_total` — is backwards.
+  A discontinued part with 172 in stock (`WK-KIT-ND`) comes back `IsInactive:
+  true` while carrying a real pack option: MOQ 1, $8.88, `ExtendedPrice` 44.40,
+  and `dk product` reports it orderable. A zero-stock discontinued part
+  (`18-880129-ND`) comes back `IsInactive: false` with no pack options at all.
+  Excluding inactive lines would report $0.00 for a BOM someone can actually
+  buy, which is the zero-total-that-looks-like-a-bargain failure in the
+  direction that costs money. Price from `PackOptions`; a line without them is
+  `unpriced`, which is what the flag would otherwise be standing in for.
+
+- **`KeywordResponse.AppliedParametricFiltersDto` is always empty.** It reads
+  like the echo that would tell a caller whether DigiKey honored a
+  `ParameterFilterRequest` — the one failure mode `--param` has. It is not.
+  A `Ceramic Capacitors` search returning 930,932 products still returned `[]`
+  after `Tolerance=±10%` cut it to 192,092. The whole payload carries no other
+  applied-filter signal; `SearchLocaleUsed` is the only "what did you actually
+  use" field on the response. There is nothing to model.
+
 ## Endpoint coverage
 
 Product Information v4 is fully covered except `/pricing`, `/pricingbyquantity`,
@@ -243,6 +268,14 @@ MyLists v1 is covered at both layers except `GetPartByUniqueId` and
 show` already calls), and the second by `validate/name/{name}`, which `--auto-rename`
 uses and which answers the same question plus a suggestion. Neither had a caller,
 and an unreachable client method is not "coverage".
+
+**`validate/name/{name}` is in the spec but not on the server.** Against the
+live API it answers `404 Invalid resource path`, which used to fail
+`--auto-rename` outright. `SuggestListName` therefore treats a 404 as "this
+route does not exist" and derives a free name from `AllLists` instead. Only a
+404: a 401 or a 429 says nothing about whether the name is taken, and a name
+invented from a listing dk could not read would be a guess. If DigiKey ever
+ships the route, the fallback stops being reached on its own.
 
 `ProductSummary` (associations, alternate packaging) returns `UnitPrice` as a
 preformatted **string**; `Product` and `RecommendedProduct` return it as a
