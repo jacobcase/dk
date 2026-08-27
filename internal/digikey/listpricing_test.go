@@ -633,3 +633,90 @@ func TestSelectedPackOptionIndexBounds(t *testing.T) {
 		})
 	}
 }
+
+// listparts_priced.json is a captured response for a list holding three parts,
+// two of them priced. It settled several questions the invented fixtures got
+// wrong, and is the reference for how MyLists really shapes pack options.
+func TestRealPricedListPartsResponse(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "listparts_priced.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resp PartsResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("the real payload does not decode: %v", err)
+	}
+	if resp.TotalParts != 3 || len(resp.PartsList) != 3 {
+		t.Fatalf("TotalParts=%d parts=%d, want 3 and 3", resp.TotalParts, len(resp.PartsList))
+	}
+
+	byRequested := map[string]ListPart{}
+	for _, p := range resp.PartsList {
+		byRequested[p.RequestedPartNumber] = p
+	}
+
+	p, ok := byRequested["311-1088-1-ND"]
+	if !ok {
+		t.Fatal("the cut-tape part is missing from the capture")
+	}
+	q := p.Quantities[0]
+
+	// MyLists spells pack types as short codes — CT, DKR, TR — while the
+	// Product Information API uses "Cut Tape (CT)", "Digi-Reel®" and
+	// "Tape & Reel (TR)". The two vocabularies do not overlap, which is why
+	// SelectedPackOption keys off the index and not the name.
+	var codes []string
+	for _, o := range q.PackOptions {
+		codes = append(codes, o.PackType)
+	}
+	want := []string{"CT", "DKR", "TR"}
+	if len(codes) != len(want) {
+		t.Fatalf("pack types = %v, want %v", codes, want)
+	}
+	for i := range want {
+		if codes[i] != want[i] {
+			t.Errorf("pack type %d = %q, want %q — if MyLists switched to long "+
+				"names, revisit the lookup in SelectedPackOption", i, codes[i], want[i])
+		}
+	}
+	if q.SelectedPackType != "" {
+		t.Errorf("SelectedPackType = %q; the capture has it empty on every line", q.SelectedPackType)
+	}
+
+	// The selected option is cut tape at 250 for 6.80 — matching what
+	// `dk pricing 311-1088-1-ND --qty 250` independently reported. Falling
+	// through to tape & reel would have said 54.32 for a 4000-piece minimum.
+	opt, ok := q.SelectedPackOption()
+	if !ok {
+		t.Fatal("no pack option selected for a priced line")
+	}
+	if opt.PackType != "CT" || opt.ExtendedPrice != 6.8 {
+		t.Errorf("selected %q at ext %v, want CT at 6.8", opt.PackType, opt.ExtendedPrice)
+	}
+	if got := p.ExtendedPrice(); got != 6.8 {
+		t.Errorf("ExtendedPrice() = %v, want 6.8", got)
+	}
+
+	// The part-level number is the REEL while the priced option is cut tape.
+	// Reporting the two together would pair a part number with a price that
+	// does not describe it.
+	if p.DigiKeyPartNumber != "311-1088-2-ND" {
+		t.Errorf("part-level DigiKeyPartNumber = %q, want the reel 311-1088-2-ND", p.DigiKeyPartNumber)
+	}
+	if got := p.OrderablePartNumber(); got != "311-1088-1-ND" {
+		t.Errorf("OrderablePartNumber() = %q, want the cut-tape number that was priced", got)
+	}
+
+	// The third part matched nothing: no pack options, so it is unpriced
+	// rather than free.
+	un, ok := byRequested["296-1395-1-ND"]
+	if !ok {
+		t.Fatal("the unmatched part is missing from the capture")
+	}
+	if len(un.Quantities[0].PackOptions) != 0 {
+		t.Errorf("expected no pack options on the unmatched part")
+	}
+	if got := un.ExtendedPrice(); got != 0 {
+		t.Errorf("ExtendedPrice() = %v, want 0", got)
+	}
+}

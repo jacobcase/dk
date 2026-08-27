@@ -231,6 +231,23 @@ func (p ListPart) RequestedQty() int {
 	return total
 }
 
+// OrderablePartNumber returns the DigiKey part number of the pack option that
+// was actually priced, falling back to the part-level number.
+//
+// These differ routinely. A captured response for a cut-tape request carries
+// DigiKeyPartNumber 311-1088-2-ND — the reel — while the selected pack option
+// is 311-1088-1-ND at a quite different price. Reporting the part-level number
+// beside the selected option's price pairs an identifier with a figure that
+// does not describe it, and that pair is what a human orders from.
+func (p ListPart) OrderablePartNumber() string {
+	for _, q := range p.Quantities {
+		if opt, ok := q.SelectedPackOption(); ok && opt.DigiKeyPartNumber != "" {
+			return opt.DigiKeyPartNumber
+		}
+	}
+	return p.DigiKeyPartNumber
+}
+
 // pricedLines sums the selected pack option across every quantity line.
 //
 // RequestedQty already sums all lines, so the money has to as well: reporting

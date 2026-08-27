@@ -6,3 +6,8 @@ coverage.html
 config.json
 token.json
 .env
+
+# Scratch API captures pulled down for debugging. Real payloads that
+# belong in the repo go to internal/digikey/testdata/ instead.
+out-raw.json
+*-raw.json

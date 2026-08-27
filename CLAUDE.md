@@ -96,6 +96,27 @@ leading dots; `TestDocumentFilenameIsContained` is the guard. Downloads are
 atomic (temp file + rename), size-capped, and carry no `Authorization` header,
 since the files live on a CDN rather than the API.
 
+## Pairing a part number with its price
+
+Two commands used to report a part number and a price that described *different*
+things. Both were caught only by running against the live API, and both are the
+same mistake:
+
+- **A list line's part-level `DigiKeyPartNumber` is not the one that was
+  priced.** A cut-tape request comes back with the *reel* at the top level while
+  `SelectedPackOptionIndex` points at the cut-tape pack option. `ListPart.
+  OrderablePartNumber` returns the selected option's number, so
+  `dk list show` names the thing it quoted. `matchListEntries` therefore also
+  matches pack-option part numbers — anything `list show` prints has to be
+  removable by `list rm`.
+- **`Product.UnitPrice` is not the chosen variation's price.** It is the catalog
+  headline figure (cut tape at qty 1); `PrimaryVariation` often selects the reel.
+  Emitting both put a 4000-piece MOQ next to a single-unit price and overstated
+  the line sevenfold. `newProductView` prefers the variation's own price.
+
+The rule: whenever a view reports an identifier and a figure side by side, both
+must come from the same variation or pack option.
+
 ## Endpoint coverage
 
 Product Information v4 is fully covered except `/pricing`, `/pricingbyquantity`,
@@ -180,7 +201,10 @@ assumed, so prefer it when changing list pricing:
 - **`SelectedPackType` came back empty**; the selection lives in
   `SelectedPackOptionIndex`. `SelectedPackOption` therefore tries the index
   first and treats the name as a fallback. Matching on the name alone would
-  never fire against real data.
+  never fire against real data — and could not work anyway: MyLists spells pack
+  types as short codes (`CT`, `DKR`, `TR`) while Product Information uses
+  `Cut Tape (CT)`, `Digi-Reel®`, `Tape & Reel (TR)`. The two vocabularies do
+  not overlap. See `testdata/listparts_priced.json`.
 - **`PackOptions` was an empty array** for an Obsolete, zero-stock part. There
   is no price anywhere on such a line, which is why it must read as *unpriced*
   (`unpriced_parts`) rather than free — a zero total that looks like a bargain

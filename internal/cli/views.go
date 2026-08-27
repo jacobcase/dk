@@ -165,8 +165,15 @@ func newProductView(p digikey.Product, currency string) ProductView {
 		v.DigiKeyPartNumber = pv.DigiKeyProductNumber
 		v.Packaging = pv.PackageType.Name
 		v.MinimumOrderQuantity = pv.MinimumOrderQuantity
-		if v.UnitPrice == 0 {
-			v.UnitPrice = pv.LowestUnitPrice()
+		// The price has to describe the same variation as the part number and
+		// MOQ beside it. Product.UnitPrice is the catalog headline figure — for
+		// 311-1088-1-ND it is the cut-tape price at quantity 1 — while
+		// PrimaryVariation may well pick the reel. Reporting the two together
+		// paired a 4000-piece MOQ with a single-unit price, overstating the
+		// line roughly sevenfold. Prefer the chosen variation's own price and
+		// fall back to the product-level one only when it quoted none.
+		if price := pv.LowestUnitPrice(); price > 0 {
+			v.UnitPrice = price
 		}
 	}
 	if v.MinimumOrderQuantity == 0 {

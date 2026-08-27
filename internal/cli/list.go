@@ -72,7 +72,7 @@ type ListPartView struct {
 func newListPartView(p digikey.ListPart) ListPartView {
 	return ListPartView{
 		UniqueID:               p.UniqueID,
-		DigiKeyPartNumber:      p.DigiKeyPartNumber,
+		DigiKeyPartNumber:      p.OrderablePartNumber(),
 		RequestedPartNumber:    p.RequestedPartNumber,
 		ManufacturerPartNumber: p.ManufacturerPartNumber,
 		Manufacturer:           p.Manufacturer,
@@ -1141,15 +1141,34 @@ func matchListEntries(parts []digikey.ListPart, target string) []string {
 	}
 	var ids []string
 	for _, p := range parts {
-		switch {
-		case strings.EqualFold(p.UniqueID, target),
-			strings.EqualFold(p.DigiKeyPartNumber, target),
-			strings.EqualFold(p.RequestedPartNumber, target),
-			strings.EqualFold(p.ManufacturerPartNumber, target):
+		if strings.EqualFold(p.UniqueID, target) ||
+			strings.EqualFold(p.DigiKeyPartNumber, target) ||
+			strings.EqualFold(p.RequestedPartNumber, target) ||
+			strings.EqualFold(p.ManufacturerPartNumber, target) ||
+			matchesPackOption(p, target) {
 			ids = append(ids, p.UniqueID)
 		}
 	}
 	return ids
+}
+
+// matchesPackOption reports whether target names one of the line's packaging
+// options.
+//
+// Every pack option has its own DigiKey part number, and `dk list show` prints
+// the one that was actually priced — which is frequently neither the
+// part-level number nor the number originally requested. Without this, a user
+// could copy a part number out of `list show` and have `list rm` tell them it
+// is not in the list.
+func matchesPackOption(p digikey.ListPart, target string) bool {
+	for _, q := range p.Quantities {
+		for _, opt := range q.PackOptions {
+			if opt.DigiKeyPartNumber != "" && strings.EqualFold(opt.DigiKeyPartNumber, target) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func newListRenameCommand(app *App) *cobra.Command {
