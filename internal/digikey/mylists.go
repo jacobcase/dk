@@ -614,8 +614,12 @@ func (c *Client) RawListParts(ctx context.Context, listID string, startIndex, li
 	return out, nil
 }
 
-// AddParts appends parts to a list and returns the unique ids DigiKey assigned,
+// AddParts adds parts to a list and returns the unique ids DigiKey assigned,
 // which are the handles used to update or remove individual lines.
+//
+// The endpoint takes an optional `index` query parameter that defaults to 0,
+// so parts land at the head of the list rather than the tail. Nothing here
+// sends it; the position is DigiKey's to choose and no caller depends on it.
 func (c *Client) AddParts(ctx context.Context, listID string, parts []RequestedPart) ([]string, error) {
 	if strings.TrimSpace(listID) == "" {
 		return nil, errors.New("list id is required")

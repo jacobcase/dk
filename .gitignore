@@ -11,3 +11,8 @@ token.json
 # belong in the repo go to internal/digikey/testdata/ instead.
 out-raw.json
 *-raw.json
+
+# DigiKey OpenAPI specs downloaded from developer.digikey.com. Keep them local:
+# the API User Agreement classifies them as Documentation and forbids
+# publishing or distributing it. See docs/openapi/README.md.
+docs/openapi/*.json

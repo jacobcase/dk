@@ -296,15 +296,23 @@ escaping surviving on the wire).
 ## API schema reference
 
 Field names come from DigiKey's OpenAPI specs and are PascalCase; a lowercase key
-is silently ignored by the API. Two known inconsistencies are handled explicitly:
+is silently ignored by the API. The specs themselves are not in the repo — see
+`docs/openapi/README.md` for why and how to fetch them; they are worth having
+locally before changing any wire type. Two known inconsistencies are handled explicitly:
 
 - `ProductVariation` spells stock `QuantityAvailableforPackageType` (lowercase
   `f`) in v4, with `QuantityAvailable` as an older alias — `Stock()` covers both.
 - Category children are `Children` on the taxonomy endpoints but
   `ChildCategories` inside a `Product` — `CategoryNode.Children()` covers both.
 
-MyLists uses `X-DIGIKEY-Account-Id` where Product Information uses
-`X-DIGIKEY-Customer-Id`; the client sends both from one config value.
+Both APIs name this header `X-DIGIKEY-Account-Id` — Product Information v4
+declares it on 5 paths, MyLists v1 on 6, and neither spec mentions
+`X-DIGIKEY-Customer-Id` at all. The client sends both from one config value;
+Customer-Id is a v3-era carryover kept only because DigiKey ignores unknown
+headers, not because v4 wants it. Product Information's parameter description
+adds that Account-Id "is a required field to receive a successful response"
+under 2-legged OAuth, so a client-credentials caller with no `account_id`
+configured is sending less than the API asks for.
 
 `internal/digikey/testdata/listparts_obsolete.json` is a real `/parts` response,
 lightly trimmed. Three things in it contradicted what the hand-written fixtures

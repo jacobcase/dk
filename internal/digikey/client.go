@@ -226,9 +226,9 @@ func (c *Client) do(ctx context.Context, req request) error {
 		httpReq.Header.Set("Content-Type", "application/json")
 	}
 	if c.accountID != "" {
-		// MyLists v1 names this header Account-Id; Product Information v4 uses
-		// Customer-Id for the same purpose. Sending both is harmless and lets
-		// one config value serve both APIs.
+		// Both v4 APIs declare Account-Id; neither OpenAPI spec mentions
+		// Customer-Id, which is a v3-era name kept only because DigiKey
+		// ignores headers it does not know. One config value serves both.
 		httpReq.Header.Set("X-DIGIKEY-Account-Id", c.accountID)
 		httpReq.Header.Set("X-DIGIKEY-Customer-Id", c.accountID)
 	}
