@@ -186,15 +186,6 @@ func (c *CallbackServer) Close() error {
 	return c.server.Shutdown(ctx)
 }
 
-// Addr reports the address the callback server is listening on, which is useful
-// when the redirect URI omits an explicit port.
-func (c *CallbackServer) Addr() string {
-	if c.listener == nil {
-		return ""
-	}
-	return c.listener.Addr().String()
-}
-
 func isLoopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true

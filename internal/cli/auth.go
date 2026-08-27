@@ -201,7 +201,25 @@ func (a *App) browserLogin(ctx context.Context, authURL, redirectURI, state stri
 				Err:      err,
 			}
 		}
-		return auth.CallbackResult{}, err
+		// Ctrl-C arrives here as context.Canceled, because Wait returns
+		// ctx.Err(). It must pass through unwrapped: classify checks for an
+		// *Error before it checks for context.Canceled, so wrapping this would
+		// shadow the "cancelled" code and report an interrupted login as
+		// auth_required — sending an agent off to ask a human to re-authorize
+		// when nothing is wrong with the credentials.
+		if errors.Is(err, context.Canceled) {
+			return auth.CallbackResult{}, err
+		}
+		// Anything else here is DigiKey refusing the authorization — most often
+		// the user declining consent. --manual reports that as an auth failure,
+		// so this path must too, rather than exiting 1 for the same action.
+		return auth.CallbackResult{}, &Error{
+			Code:     CodeAuth,
+			Message:  err.Error(),
+			Hint:     "Re-run `dk auth login` and approve the request, or use --manual to paste the redirect URL yourself.",
+			ExitCode: ExitAuth,
+			Err:      err,
+		}
 	}
 	return result, nil
 }

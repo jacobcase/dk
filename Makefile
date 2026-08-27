@@ -3,7 +3,9 @@ PKG     := ./cmd/dk
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X github.com/jacobcase/dk/internal/cli.Version=$(VERSION)
 
-.PHONY: all build install test test-race cover lint fmt tidy clean
+GOLANGCI := github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
+
+.PHONY: all build install test test-race cover lint lint-full fmt tidy clean
 
 all: lint test build
 
@@ -30,6 +32,11 @@ lint:
 		echo "gofmt needed:"; echo "$$unformatted"; exit 1; \
 	fi
 	go vet ./...
+
+# The full linter set CI runs. Uses `go run` so there is nothing to install
+# first; it is a separate target because the first run downloads a lot.
+lint-full: lint
+	go run $(GOLANGCI) run ./...
 
 fmt:
 	gofmt -w .

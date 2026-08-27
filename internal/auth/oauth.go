@@ -155,6 +155,11 @@ func (m *Manager) UserToken(ctx context.Context) (string, error) {
 		// A rejected refresh token cannot be recovered from without a new login.
 		var oerr *Error
 		if errors.As(err, &oerr) && oerr.StatusCode >= 400 && oerr.StatusCode < 500 {
+			// Drop the dead token. Left in place it makes `dk auth status`
+			// report user_logged_in forever while every list command exits 3 —
+			// and an agent, which cannot run `dk auth login`, would believe the
+			// status over the failure.
+			_ = m.Store.Delete(KindUser, m.Environment)
 			return "", fmt.Errorf("%w: stored refresh token was rejected (%s)", ErrLoginRequired, oerr.Message())
 		}
 		return "", err
@@ -315,9 +320,12 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("digikey oauth: %d %s: %s", e.StatusCode, http.StatusText(e.StatusCode), e.Message())
 }
 
+// truncate bounds an error body so a DigiKey HTML error page does not become
+// the whole terminal. It counts runes, since a byte slice can land mid-rune.
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return s[:n] + "..."
+	return string(r[:n]) + "..."
 }

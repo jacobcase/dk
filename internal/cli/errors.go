@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,6 +35,10 @@ const (
 	CodeRateLimit   = "rate_limited"
 	CodeAPI         = "api_error"
 	CodeAmbiguous   = "ambiguous_list"
+	CodeCancelled   = "cancelled"
+	// CodeConfig is a config file that exists but cannot be used. Distinct from
+	// CodeCredentials, which means the file is fine and a field is missing.
+	CodeConfig = "config_invalid"
 )
 
 // Error carries an exit code and a machine-readable code alongside the message.
@@ -70,12 +75,34 @@ func classify(err error) *Error {
 		return cliErr
 	}
 
+	// Ctrl-C. Classified like any other failure so JSON callers still get a
+	// structured object on stderr rather than a line of prose.
+	if errors.Is(err, context.Canceled) {
+		return &Error{
+			Code:     CodeCancelled,
+			Message:  "cancelled",
+			ExitCode: ExitError,
+			Err:      err,
+		}
+	}
+
 	if errors.Is(err, auth.ErrLoginRequired) {
 		return &Error{
 			Code:     CodeAuth,
 			Message:  err.Error(),
 			Hint:     "Run `dk auth login` once in an interactive terminal. MyLists requires a 3-legged token tied to your DigiKey account.",
 			ExitCode: ExitAuth,
+			Err:      err,
+		}
+	}
+
+	// An empty list argument is a bad invocation, not a missing list.
+	if errors.Is(err, digikey.ErrListRefRequired) {
+		return &Error{
+			Code:     CodeUsage,
+			Message:  err.Error(),
+			Hint:     "Pass a list name or id. Run `dk list ls` to see what exists.",
+			ExitCode: ExitUsage,
 			Err:      err,
 		}
 	}
@@ -164,20 +191,18 @@ func classifyAPIError(apiErr *digikey.APIError) *Error {
 // so an agent can branch on `.error.code` without regex-matching prose.
 func writeError(w io.Writer, format output.Format, e *Error) {
 	if format == output.FormatJSON {
-		payload := map[string]any{
-			"error": map[string]any{
-				"code":    e.Code,
-				"message": e.Message,
-			},
+		errObj := map[string]any{
+			"code":      e.Code,
+			"message":   e.Message,
+			"exit_code": e.ExitCode,
 		}
-		errObj := payload["error"].(map[string]any)
 		if e.Hint != "" {
 			errObj["hint"] = e.Hint
 		}
 		if len(e.Details) > 0 {
 			errObj["details"] = e.Details
 		}
-		errObj["exit_code"] = e.ExitCode
+		payload := map[string]any{"error": errObj}
 
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")

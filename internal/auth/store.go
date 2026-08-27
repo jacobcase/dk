@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/jacobcase/dk/internal/atomicfile"
 )
 
 // Token is a cached OAuth token. RefreshToken is only populated for user
@@ -168,27 +170,5 @@ func (s *Store) flush() error {
 	}
 	data = append(data, '\n')
 
-	dir := filepath.Dir(s.path)
-	tmp, err := os.CreateTemp(dir, filepath.Base(s.path)+".tmp*")
-	if err != nil {
-		return fmt.Errorf("create temp token file: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return fmt.Errorf("chmod temp token file: %w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write temp token file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp token file: %w", err)
-	}
-	if err := os.Rename(tmpName, s.path); err != nil {
-		return fmt.Errorf("rename token file: %w", err)
-	}
-	return nil
+	return atomicfile.Write(s.path, data, 0o600)
 }

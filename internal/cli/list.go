@@ -95,10 +95,20 @@ type ListDetail struct {
 	ListView
 	Currency string         `json:"currency,omitempty"`
 	Parts    []ListPartView `json:"parts"`
-	// EstimatedTotal sums the resolved line totals. It excludes shipping, tax,
-	// and any line DigiKey could not price, so treat it as a rough figure.
+	// Returned is how many parts are in Parts. It differs from TotalParts only
+	// when an explicit --limit/--offset asked for a single page, and exists so
+	// that case is visible rather than looking like a complete list.
+	Returned int `json:"returned"`
+	// EstimatedTotal sums the resolved line totals of the parts actually
+	// returned. It excludes shipping, tax, and any line DigiKey could not price,
+	// so treat it as a rough figure.
 	EstimatedTotal float64 `json:"estimated_total"`
 	UnmatchedParts int     `json:"unmatched_parts"`
+	// UnpricedParts counts lines that matched a catalog product but carry no
+	// price — typically a pack type DigiKey did not quote at that quantity.
+	// Each contributes 0 to EstimatedTotal, so without this count the total
+	// would understate the real cost with nothing to indicate it.
+	UnpricedParts int `json:"unpriced_parts"`
 }
 
 func newListCommand(app *App) *cobra.Command {
@@ -197,6 +207,9 @@ part number on the line. Unlike rm, an ambiguous match is an error rather than
 applying to every matching line.
 
 Only the flags you pass are changed; everything else on the line is preserved.
+Passing an empty value clears a field, so --ref "" removes the reference
+designators rather than leaving them alone.
+
 This is a genuine edit, so the unique id survives — removing and re-adding would
 mint a new one and lose the reference designators and notes.`,
 		Args:              cobra.ExactArgs(2),
@@ -204,7 +217,10 @@ mint a new one and lose the reference designators and notes.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			listRef, target := args[0], args[1]
 
-			if !cmd.Flags().Changed("qty") && ref == "" && note == "" && custRef == "" {
+			// Whether a flag was passed, not whether its value is non-empty:
+			// --ref "" has to mean "clear it", not "leave it alone".
+			if !cmd.Flags().Changed("qty") && !cmd.Flags().Changed("ref") &&
+				!cmd.Flags().Changed("note") && !cmd.Flags().Changed("customer-ref") {
 				return usageErrorf("nothing to change; pass at least one of --qty, --ref, --note, or --customer-ref")
 			}
 			if cmd.Flags().Changed("qty") && qty < 1 {
@@ -222,12 +238,9 @@ mint a new one and lose the reference designators and notes.`,
 			}
 
 			// Resolve the target against the fully-resolved parts, which carry
-			// every part number the user might have typed.
-			parts, err := client.ListParts(ctx, summary.ID, 0, 0, digikey.Locale{
-				Site:     app.Cfg.Locale.Site,
-				Language: app.Cfg.Locale.Language,
-				Currency: app.Cfg.Locale.Currency,
-			})
+			// every part number the user might have typed. Every page of them:
+			// a part on page two would otherwise report as not found.
+			parts, err := client.AllListParts(ctx, summary.ID, app.locale())
 			if err != nil {
 				return err
 			}
@@ -270,15 +283,15 @@ mint a new one and lose the reference designators and notes.`,
 				updated.Quantities = setQuantity(updated.Quantities, qty)
 				changed = append(changed, "quantity")
 			}
-			if ref != "" {
+			if cmd.Flags().Changed("ref") {
 				updated.ReferenceDesignator = ref
 				changed = append(changed, "reference_designator")
 			}
-			if custRef != "" {
+			if cmd.Flags().Changed("customer-ref") {
 				updated.CustomerReference = custRef
 				changed = append(changed, "customer_reference")
 			}
-			if note != "" {
+			if cmd.Flags().Changed("note") {
 				updated.Notes = note
 				changed = append(changed, "notes")
 			}
@@ -416,17 +429,28 @@ reviewed. The copy is independent: editing it does not affect the source.`,
 func newListLsCommand(app *App) *cobra.Command {
 	var limit, offset int
 
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:     "ls",
 		Aliases: []string{"list", "ls-lists"},
 		Short:   "List your DigiKey lists",
-		Args:    cobra.NoArgs,
+		Long: `List every list on your DigiKey account.
+
+Without --limit or --offset this pages through the whole set, so the output
+matches what the other list commands can resolve by name. Pass either flag to
+fetch a single page instead.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := app.Client()
 			if err != nil {
 				return err
 			}
-			lists, err := client.Lists(cmd.Context(), offset, limit)
+
+			var lists []digikey.ListSummary
+			if limit > 0 || offset > 0 {
+				lists, err = client.Lists(cmd.Context(), offset, limit)
+			} else {
+				lists, err = client.AllLists(cmd.Context())
+			}
 			if err != nil {
 				return err
 			}
@@ -446,6 +470,11 @@ func newListLsCommand(app *App) *cobra.Command {
 			return app.Printer.Print(views, t)
 		},
 	}
+
+	f := cmd.Flags()
+	f.IntVarP(&limit, "limit", "n", 0, "maximum lists to return (0 for DigiKey's default)")
+	f.IntVar(&offset, "offset", 0, "index of the first list, for paging")
+	return cmd
 }
 
 func newListCreateCommand(app *App) *cobra.Command {
@@ -529,7 +558,10 @@ func normalizeVisibility(v string) (string, error) {
 }
 
 func newListShowCommand(app *App) *cobra.Command {
-	var limit, offset int
+	var (
+		limit, offset int
+		raw           bool
+	)
 
 	cmd := &cobra.Command{
 		Use:   "show <list>",
@@ -538,11 +570,24 @@ func newListShowCommand(app *App) *cobra.Command {
 
   dk list show "Bench PSU rev A"
 
+Without --limit or --offset this pages through every part, so the totals cover
+the whole list. Pass either flag to fetch a single page instead.
+
 The MATCHED column is the one to watch: a false there means DigiKey could not
 map your part number to a catalog product, so that line cannot be ordered.`,
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: app.completeListNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if limit < 0 {
+				return usageErrorf("--limit must not be negative")
+			}
+			if offset < 0 {
+				return usageErrorf("--offset must not be negative")
+			}
+			if err := app.checkRawFormat(raw); err != nil {
+				return err
+			}
+
 			ctx := cmd.Context()
 			client, err := app.Client()
 			if err != nil {
@@ -552,11 +597,24 @@ map your part number to a catalog product, so that line cannot be ordered.`,
 			if err != nil {
 				return err
 			}
-			parts, err := client.ListParts(ctx, summary.ID, offset, limit, digikey.Locale{
-				Site:     app.Cfg.Locale.Site,
-				Language: app.Cfg.Locale.Language,
-				Currency: app.Cfg.Locale.Currency,
-			})
+
+			// --raw is a single page by design: it exists to show what DigiKey
+			// actually sends, and stitching several responses together would be
+			// a shape DigiKey never returned.
+			if raw {
+				payload, err := client.RawListParts(ctx, summary.ID, offset, limit, app.locale())
+				if err != nil {
+					return err
+				}
+				return app.printRaw(payload)
+			}
+
+			var parts *digikey.PartsResponse
+			if limit > 0 || offset > 0 {
+				parts, err = client.ListParts(ctx, summary.ID, offset, limit, app.locale())
+			} else {
+				parts, err = client.AllListParts(ctx, summary.ID, app.locale())
+			}
 			if err != nil {
 				return err
 			}
@@ -566,10 +624,17 @@ map your part number to a catalog product, so that line cannot be ordered.`,
 				return err
 			}
 
+			if detail.Returned < detail.TotalParts {
+				app.Printer.PrintText("\nShowing %d of %d parts; the total below covers only this page.",
+					detail.Returned, detail.TotalParts)
+			}
 			app.Printer.PrintText("\n%d parts, estimated total %s %s (excludes shipping and tax)",
 				len(detail.Parts), output.Money(detail.EstimatedTotal), detail.Currency)
 			if detail.UnmatchedParts > 0 {
 				app.Printer.PrintText("%d part(s) did not match a DigiKey product and cannot be ordered.", detail.UnmatchedParts)
+			}
+			if detail.UnpricedParts > 0 {
+				app.Printer.PrintText("%d matched part(s) carry no price, so the total above is an underestimate.", detail.UnpricedParts)
 			}
 			app.Printer.PrintText("Review and order at %s", detail.URL)
 			return nil
@@ -579,6 +644,7 @@ map your part number to a catalog product, so that line cannot be ordered.`,
 	f := cmd.Flags()
 	f.IntVarP(&limit, "limit", "n", 0, "maximum parts to return (0 for DigiKey's default)")
 	f.IntVar(&offset, "offset", 0, "index of the first part, for paging")
+	f.BoolVar(&raw, "raw", false, "emit DigiKey's unmodified response for one page (implies --output json)")
 	return cmd
 }
 
@@ -589,18 +655,25 @@ func buildListDetail(summary digikey.ListSummary, parts *digikey.PartsResponse, 
 		return detail
 	}
 	// TotalParts from the parts endpoint is authoritative; the summary's count
-	// can lag right after a mutation.
-	if parts.TotalParts > 0 {
-		detail.TotalParts = parts.TotalParts
-	}
+	// can lag right after a mutation. Taken unconditionally, including zero —
+	// guarding on `> 0` let a stale summary claim a list still had parts after
+	// the last one was removed, producing "Showing 0 of 5 parts".
+	detail.TotalParts = parts.TotalParts
 	detail.Parts = make([]ListPartView, 0, len(parts.PartsList))
 	for _, p := range parts.PartsList {
 		v := newListPartView(p)
 		detail.Parts = append(detail.Parts, v)
 		detail.EstimatedTotal += v.ExtendedPrice
-		if !v.Matched {
+		switch {
+		case !v.Matched:
 			detail.UnmatchedParts++
+		case v.ExtendedPrice <= 0:
+			detail.UnpricedParts++
 		}
+	}
+	detail.Returned = len(detail.Parts)
+	if detail.TotalParts < detail.Returned {
+		detail.TotalParts = detail.Returned
 	}
 	return detail
 }
@@ -984,12 +1057,9 @@ a part number as it appears in the list:
 			}
 
 			// Fetch the current contents so part numbers can be mapped to the
-			// unique ids the delete endpoint requires.
-			parts, err := client.ListParts(ctx, summary.ID, 0, 0, digikey.Locale{
-				Site:     app.Cfg.Locale.Site,
-				Language: app.Cfg.Locale.Language,
-				Currency: app.Cfg.Locale.Currency,
-			})
+			// unique ids the delete endpoint requires. All of them: removing a
+			// part on page two must not report it as absent.
+			parts, err := client.AllListParts(ctx, summary.ID, app.locale())
 			if err != nil {
 				return err
 			}
@@ -1001,6 +1071,10 @@ a part number as it appears in the list:
 				Reason   string `json:"reason,omitempty"`
 			}
 			results := make([]removal, 0, len(args)-1)
+			// A rejected delete is a real failure, not a per-row footnote. Keep
+			// the first one so the command can exit with the code that matches it
+			// — a rate limit has to surface as 5, not as a successful run.
+			var firstErr error
 
 			for _, target := range args[1:] {
 				uniqueIDs := matchListEntries(parts.PartsList, target)
@@ -1010,6 +1084,9 @@ a part number as it appears in the list:
 				}
 				for _, uid := range uniqueIDs {
 					if err := client.DeletePart(ctx, summary.ID, uid); err != nil {
+						if firstErr == nil {
+							firstErr = err
+						}
 						results = append(results, removal{Target: target, UniqueID: uid, Reason: err.Error()})
 						continue
 					}
@@ -1034,6 +1111,12 @@ a part number as it appears in the list:
 			}
 			if err := app.Printer.Print(payload, t); err != nil {
 				return err
+			}
+			// The table above already names which targets failed and why; this
+			// only decides the exit code. A DigiKey rejection wins over
+			// "not found", because it is the more actionable failure.
+			if firstErr != nil {
+				return firstErr
 			}
 			if removed == 0 {
 				return &Error{
@@ -1126,12 +1209,24 @@ discard a list it did not mean to touch.`,
 				return err
 			}
 
-			if summary.TotalParts > 0 && !force {
-				return &Error{
-					Code:     CodeUsage,
-					Message:  fmt.Sprintf("list %q still has %d part(s)", summary.ListName, summary.TotalParts),
-					Hint:     "Re-run with --force to delete it anyway.",
-					ExitCode: ExitUsage,
+			if !force {
+				// summary.TotalParts comes from the lists endpoint, which the
+				// rest of this file treats as lagging behind a mutation. Guarding
+				// a permanent delete on a stale zero would discard a list that
+				// had just been filled, so ask the parts endpoint instead. One
+				// row is enough: TotalParts rides along with it.
+				count, err := client.ListParts(ctx, summary.ID, 0, 1, app.locale())
+				if err != nil {
+					return err
+				}
+				remaining := max(count.TotalParts, len(count.PartsList))
+				if remaining > 0 {
+					return &Error{
+						Code:     CodeUsage,
+						Message:  fmt.Sprintf("list %q still has %d part(s)", summary.ListName, remaining),
+						Hint:     "Re-run with --force to delete it anyway.",
+						ExitCode: ExitUsage,
+					}
 				}
 			}
 
@@ -1172,11 +1267,9 @@ reference designators, and line pricing, with nothing truncated.`,
 			if err != nil {
 				return err
 			}
-			parts, err := client.ListParts(ctx, summary.ID, 0, 0, digikey.Locale{
-				Site:     app.Cfg.Locale.Site,
-				Language: app.Cfg.Locale.Language,
-				Currency: app.Cfg.Locale.Currency,
-			})
+			// A BOM missing its last page is worse than no BOM, so this always
+			// pages the whole list.
+			parts, err := client.AllListParts(ctx, summary.ID, app.locale())
 			if err != nil {
 				return err
 			}
@@ -1218,7 +1311,7 @@ func (a *App) completeListNames(cmd *cobra.Command, args []string, toComplete st
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
-	lists, err := client.Lists(cmd.Context(), 0, 0)
+	lists, err := client.AllLists(cmd.Context())
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}

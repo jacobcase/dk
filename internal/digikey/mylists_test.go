@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -460,16 +461,86 @@ func TestGetListDecodesRequestedParts(t *testing.T) {
 	}
 }
 
-func TestIsValidListNameDecodesBareBool(t *testing.T) {
-	rc := newRoutedClient(t, map[string]route{
-		"GET /mylists/v1/lists/validate/Bench PSU": {http.StatusOK, `true`},
-	})
-	ok, err := rc.IsValidListName(context.Background(), "Bench PSU")
+func TestAllListsPagesUntilShortPage(t *testing.T) {
+	// Resolving a list by name needs every list. A list on page two must not
+	// be indistinguishable from one that does not exist.
+	var gotQueries []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/oauth2/token" {
+			_, _ = io.WriteString(w, `{"access_token":"tok","expires_in":1800}`)
+			return
+		}
+		gotQueries = append(gotQueries, r.URL.RawQuery)
+
+		// Lists omits startIndex when it is 0, so an absent value is page one.
+		if start := r.URL.Query().Get("startIndex"); start == "" || start == "0" {
+			// A full page, which must trigger another request.
+			var b strings.Builder
+			b.WriteString(`[`)
+			for i := range listPageSize {
+				if i > 0 {
+					b.WriteString(",")
+				}
+				fmt.Fprintf(&b, `{"Id":"id-%d","ListName":"List %d"}`, i, i)
+			}
+			b.WriteString(`]`)
+			_, _ = io.WriteString(w, b.String())
+			return
+		}
+		_, _ = io.WriteString(w, `[{"Id":"last","ListName":"Last List"}]`)
+	}))
+	defer srv.Close()
+
+	c, err := New(Options{BaseURL: srv.URL, ClientID: "id", Tokens: &staticTokens{app: "a", user: "u"}})
 	if err != nil {
-		t.Fatalf("IsValidListName() error = %v", err)
+		t.Fatal(err)
 	}
-	if !ok {
-		t.Error("IsValidListName() = false, want true")
+
+	all, err := c.AllLists(context.Background())
+	if err != nil {
+		t.Fatalf("AllLists() error = %v", err)
+	}
+	if len(all) != listPageSize+1 {
+		t.Errorf("AllLists() returned %d lists, want %d", len(all), listPageSize+1)
+	}
+	if all[len(all)-1].ID != "last" {
+		t.Errorf("last list = %q, want the entry from page two", all[len(all)-1].ID)
+	}
+	if len(gotQueries) != 2 {
+		t.Fatalf("made %d list requests (%v), want 2", len(gotQueries), gotQueries)
+	}
+	if !strings.Contains(gotQueries[1], "startIndex=100") {
+		t.Errorf("second request query = %q, want startIndex=100", gotQueries[1])
+	}
+}
+
+func TestAllListsStopsOnAServerThatIgnoresPaging(t *testing.T) {
+	// A server that returns a full page forever would otherwise loop until the
+	// process ran out of memory.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/oauth2/token" {
+			_, _ = io.WriteString(w, `{"access_token":"tok","expires_in":1800}`)
+			return
+		}
+		var b strings.Builder
+		b.WriteString(`[`)
+		for i := range listPageSize {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, `{"Id":"id-%d"}`, i)
+		}
+		b.WriteString(`]`)
+		_, _ = io.WriteString(w, b.String())
+	}))
+	defer srv.Close()
+
+	c, err := New(Options{BaseURL: srv.URL, ClientID: "id", Tokens: &staticTokens{app: "a", user: "u"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.AllLists(context.Background()); err == nil {
+		t.Error("AllLists() returned nil error against a server that ignores startIndex")
 	}
 }
 

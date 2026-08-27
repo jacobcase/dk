@@ -3,7 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -554,7 +554,7 @@ func matchFacetValue(facet ParameterFacet, want string) (string, error) {
 func sampleValueNames(facet ParameterFacet, max int) string {
 	values := make([]ParameterFacetValue, len(facet.Values))
 	copy(values, facet.Values)
-	sort.SliceStable(values, func(i, j int) bool { return values[i].ProductCount > values[j].ProductCount })
+	slices.SortStableFunc(values, func(a, b ParameterFacetValue) int { return b.ProductCount - a.ProductCount })
 
 	names := make([]string, 0, max)
 	for i, v := range values {

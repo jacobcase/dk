@@ -218,22 +218,42 @@ func TestPrintRequiresTableForNonJSON(t *testing.T) {
 
 func TestPrintTextSuppressedInMachineFormats(t *testing.T) {
 	for _, format := range []Format{FormatJSON, FormatCSV} {
-		var buf bytes.Buffer
-		p := &Printer{Format: format, Out: &buf}
+		var out, errOut bytes.Buffer
+		p := &Printer{Format: format, Out: &out, Err: &errOut}
 		p.PrintText("Added %d parts.", 3)
 		// Prose on stdout would break a JSON or CSV parser downstream.
-		if buf.Len() != 0 {
-			t.Errorf("format %q: PrintText wrote %q, want nothing", format, buf.String())
+		if out.Len() != 0 {
+			t.Errorf("format %q: PrintText wrote %q to stdout, want nothing", format, out.String())
+		}
+		if errOut.Len() != 0 {
+			t.Errorf("format %q: PrintText wrote %q to stderr, want nothing", format, errOut.String())
 		}
 	}
 }
 
-func TestPrintTextInTableFormat(t *testing.T) {
-	var buf bytes.Buffer
-	p := &Printer{Format: FormatTable, Out: &buf}
+func TestPrintTextGoesToStderrNotStdout(t *testing.T) {
+	var out, errOut bytes.Buffer
+	p := &Printer{Format: FormatTable, Out: &out, Err: &errOut}
 	p.PrintText("Added %d parts.", 3)
-	if got := strings.TrimSpace(buf.String()); got != "Added 3 parts." {
-		t.Errorf("PrintText() wrote %q", got)
+
+	if got := strings.TrimSpace(errOut.String()); got != "Added 3 parts." {
+		t.Errorf("PrintText() wrote %q to stderr, want %q", got, "Added 3 parts.")
+	}
+	// The contract is that stdout carries only the result, in every format —
+	// redirecting table output to a file must not capture the prose with it.
+	if out.Len() != 0 {
+		t.Errorf("PrintText() wrote %q to stdout, want nothing", out.String())
+	}
+}
+
+// A Printer built without an Err writer still has to print somewhere rather
+// than dropping the message on the floor.
+func TestPrintTextFallsBackToOutWithoutErr(t *testing.T) {
+	var out bytes.Buffer
+	p := &Printer{Format: FormatTable, Out: &out}
+	p.PrintText("Added %d parts.", 3)
+	if got := strings.TrimSpace(out.String()); got != "Added 3 parts." {
+		t.Errorf("PrintText() with nil Err wrote %q, want %q", got, "Added 3 parts.")
 	}
 }
 
@@ -282,8 +302,10 @@ func TestCellFlatteningProtectsTableAlignment(t *testing.T) {
 
 func TestMoney(t *testing.T) {
 	// Zero means "DigiKey did not quote a price", which is different from free.
-	if got := Money(0); got != "-" {
-		t.Errorf("Money(0) = %q, want %q", got, "-")
+	// It must stay blank rather than a placeholder: these columns reach CSV,
+	// where a non-numeric price field breaks consumers downstream.
+	if got := Money(0); got != "" {
+		t.Errorf("Money(0) = %q, want an empty string", got)
 	}
 	if got := Money(0.0483); got != "0.0483" {
 		t.Errorf("Money(0.0483) = %q, want %q", got, "0.0483")
@@ -339,7 +361,7 @@ func TestKeyValueTableSkipsEmptyValues(t *testing.T) {
 
 func TestNewPrinterResolvesAgainstDestination(t *testing.T) {
 	// A bytes.Buffer is not a terminal, so auto must resolve to json.
-	p := NewPrinter(FormatAuto, &bytes.Buffer{})
+	p := NewPrinter(FormatAuto, &bytes.Buffer{}, &bytes.Buffer{})
 	if p.Format != FormatJSON {
 		t.Errorf("NewPrinter(auto, buffer).Format = %q, want json", p.Format)
 	}

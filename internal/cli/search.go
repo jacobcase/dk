@@ -109,6 +109,9 @@ Uses application-level (2-legged) auth, so no "dk auth login" is needed.`,
 			if offset < 0 {
 				return usageErrorf("--offset must not be negative")
 			}
+			if err := app.checkRawFormat(raw); err != nil {
+				return err
+			}
 
 			ctx := cmd.Context()
 			client, err := app.Client()
@@ -195,13 +198,17 @@ Uses application-level (2-legged) auth, so no "dk auth login" is needed.`,
 				req.SortOptions = &digikey.SortOptions{Field: field, SortOrder: order}
 			}
 
+			if raw {
+				payload, err := client.RawKeywordSearch(ctx, req)
+				if err != nil {
+					return err
+				}
+				return app.printRaw(payload)
+			}
+
 			resp, err := client.KeywordSearch(ctx, req)
 			if err != nil {
 				return err
-			}
-
-			if raw {
-				return app.Printer.Print(resp, nil)
 			}
 
 			products := resp.Products
@@ -235,17 +242,20 @@ Uses application-level (2-legged) auth, so no "dk auth login" is needed.`,
 				Currency:     currency,
 				Products:     views,
 			}
-
-			table := productTable(views, descWidth)
-			if resp.ProductsCount > offset+len(views) {
-				table.Empty = "No products matched."
+			// ExactMatches is a separate, unpaged array on the same response, so
+			// ProductsCount describes the keyword result set rather than this
+			// one. Reporting it here would advertise pages that --offset cannot
+			// reach, and the hint below would loop forever.
+			if exactOnly {
+				result.TotalMatches = len(views)
 			}
-			if err := app.Printer.Print(result, table); err != nil {
+
+			if err := app.Printer.Print(result, productTable(views, descWidth)); err != nil {
 				return err
 			}
-			if remaining := resp.ProductsCount - (offset + len(views)); remaining > 0 {
+			if shown := offset + len(views); !exactOnly && resp.ProductsCount > shown {
 				app.Printer.PrintText("\n%d of %d matches shown. Use --offset %d for the next page.",
-					offset+len(views), resp.ProductsCount, offset+len(views))
+					shown, resp.ProductsCount, shown)
 			}
 			return nil
 		},
@@ -292,24 +302,31 @@ func isZeroFilter(f *digikey.FilterOptionsRequest) bool {
 		f.ParameterFilterRequest == nil
 }
 
-// resolveManufacturerIDs turns names or numeric ids into DigiKey filter ids.
+// filterIndex describes one kind of name-to-id lookup a search filter accepts.
+type filterIndex struct {
+	// kind is the singular noun used in error messages: "manufacturer".
+	kind string
+	// command is the dk subcommand that lists valid values: "manufacturers".
+	command string
+	// fetch returns the flat id/name index, and is called at most once.
+	fetch func(context.Context) ([]digikey.NamedID, error)
+}
+
+// resolveFilterIDs turns names or numeric ids into DigiKey filter ids.
 // Accepting names matters for agent callers, which know "Murata" but not 2359.
-func resolveManufacturerIDs(ctx context.Context, client *digikey.Client, values []string) ([]digikey.FilterID, error) {
-	var needLookup bool
+//
+// The index is only fetched when at least one value actually needs resolving,
+// so a caller passing ids alone costs no extra request.
+func resolveFilterIDs(ctx context.Context, values []string, idx filterIndex) ([]digikey.FilterID, error) {
+	var index []digikey.NamedID
 	for _, v := range values {
 		if _, err := strconv.Atoi(strings.TrimSpace(v)); err != nil {
-			needLookup = true
+			index, err = idx.fetch(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("look up %s list: %w", idx.kind, err)
+			}
 			break
 		}
-	}
-
-	var index []digikey.NamedID
-	if needLookup {
-		list, err := client.Manufacturers(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("look up manufacturers: %w", err)
-		}
-		index = list
 	}
 
 	out := make([]digikey.FilterID, 0, len(values))
@@ -322,7 +339,7 @@ func resolveManufacturerIDs(ctx context.Context, client *digikey.Client, values 
 			out = append(out, digikey.FilterID{ID: v})
 			continue
 		}
-		id, err := matchNamedID(v, index, "manufacturer")
+		id, err := matchNamedID(v, index, idx)
 		if err != nil {
 			return nil, err
 		}
@@ -331,43 +348,28 @@ func resolveManufacturerIDs(ctx context.Context, client *digikey.Client, values 
 	return out, nil
 }
 
+func resolveManufacturerIDs(ctx context.Context, client *digikey.Client, values []string) ([]digikey.FilterID, error) {
+	return resolveFilterIDs(ctx, values, filterIndex{
+		kind:    "manufacturer",
+		command: "manufacturers",
+		fetch:   func(ctx context.Context) ([]digikey.NamedID, error) { return client.Manufacturers(ctx) },
+	})
+}
+
 // resolveCategoryIDs is resolveManufacturerIDs for the category taxonomy. The
 // taxonomy is a tree, so it is flattened before matching.
 func resolveCategoryIDs(ctx context.Context, client *digikey.Client, values []string) ([]digikey.FilterID, error) {
-	var needLookup bool
-	for _, v := range values {
-		if _, err := strconv.Atoi(strings.TrimSpace(v)); err != nil {
-			needLookup = true
-			break
-		}
-	}
-
-	var index []digikey.NamedID
-	if needLookup {
-		tree, err := client.Categories(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("look up categories: %w", err)
-		}
-		index = flattenCategories(tree, nil)
-	}
-
-	out := make([]digikey.FilterID, 0, len(values))
-	for _, v := range values {
-		v = strings.TrimSpace(v)
-		if v == "" {
-			continue
-		}
-		if _, err := strconv.Atoi(v); err == nil {
-			out = append(out, digikey.FilterID{ID: v})
-			continue
-		}
-		id, err := matchNamedID(v, index, "category")
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, digikey.FilterID{ID: strconv.Itoa(id)})
-	}
-	return out, nil
+	return resolveFilterIDs(ctx, values, filterIndex{
+		kind:    "category",
+		command: "categories",
+		fetch: func(ctx context.Context) ([]digikey.NamedID, error) {
+			tree, err := client.Categories(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return flattenCategories(tree, nil), nil
+		},
+	})
 }
 
 func flattenCategories(nodes []digikey.CategoryNode, acc []digikey.NamedID) []digikey.NamedID {
@@ -380,7 +382,7 @@ func flattenCategories(nodes []digikey.CategoryNode, acc []digikey.NamedID) []di
 
 // matchNamedID resolves a user-supplied name against an id index. An exact
 // case-insensitive name wins; otherwise a unique substring match is accepted.
-func matchNamedID(name string, index []digikey.NamedID, kind string) (int, error) {
+func matchNamedID(name string, index []digikey.NamedID, idx filterIndex) (int, error) {
 	var exact, partial []digikey.NamedID
 	lower := strings.ToLower(name)
 	for _, n := range index {
@@ -396,16 +398,16 @@ func matchNamedID(name string, index []digikey.NamedID, kind string) (int, error
 		return exact[0].ID, nil
 	}
 	if len(exact) > 1 {
-		return 0, usageErrorf("%s %q is ambiguous (%s)", kind, name, describeCandidates(exact))
+		return 0, usageErrorf("%s %q is ambiguous (%s)", idx.kind, name, describeCandidates(exact))
 	}
 	switch len(partial) {
 	case 0:
-		return 0, usageErrorf("unknown %s %q; run `dk %ss` to list valid values", kind, name, kind)
+		return 0, usageErrorf("unknown %s %q; run `dk %s` to list valid values", idx.kind, name, idx.command)
 	case 1:
 		return partial[0].ID, nil
 	default:
 		return 0, usageErrorf("%s %q matches %d entries (%s); be more specific or pass the numeric id",
-			kind, name, len(partial), describeCandidates(partial))
+			idx.kind, name, len(partial), describeCandidates(partial))
 	}
 }
 

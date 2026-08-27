@@ -249,15 +249,16 @@ pack can land you a 4000-piece reel.
 
 ```
 $ dk pricing 311-10.0KHRCT-ND --qty 250
-DKPN                PACKAGING        ORDER QTY  FORCED-UP  UNIT    EXTENDED  STOCK
-311-10.0KHRCT-ND    Cut Tape (CT)    250        false      0.0200  5.0000    50000
-311-10.0KHRTR-ND    Tape & Reel (TR) 4000       true       0.0050  20.0000   12000
+DKPN                PACKAGING        ORDER QTY  FORCED-UP  UNIT    EXTENDED  STOCK  STATUS
+311-10.0KHRCT-ND    Cut Tape (CT)    250        false      0.0200  5.0000    50000  Active
+311-10.0KHRTR-ND    Tape & Reel (TR) 4000       true       0.0050  20.0000   12000  Active
 
 Cheapest in stock: 311-10.0KHRCT-ND (Cut Tape (CT)), order 250 for 5.0000 USD total.
 ```
 
 `FORCED-UP` is the column that matters. In JSON, read `.best` (cheapest option
-actually in stock, or `null`) and `.forced_up`.
+actually in stock, or `null`) and `.forced_up`. The `best` key is always
+present, so `null` is the "nothing in stock" signal.
 
 ## What else do I need to buy?
 
@@ -364,8 +365,11 @@ In JSON mode a failure prints one object on stderr:
 ```
 
 Branch on `.error.code`, not on the message text. Codes: `usage_error`,
-`credentials_missing`, `auth_required`, `not_found`, `ambiguous_list`,
-`rate_limited`, `api_error`, `error`.
+`credentials_missing`, `config_invalid`, `auth_required`, `not_found`,
+`ambiguous_list`, `rate_limited`, `api_error`, `cancelled`, `error`.
+
+`cancelled` is Ctrl-C or SIGTERM, which exits 1 — distinguishable from a
+genuine failure by the code. A second Ctrl-C force-quits.
 
 ## Configuration
 
@@ -408,12 +412,17 @@ exits 3 with `auth_required`, stop and ask the human to run it once.
 make test          # go test ./...
 make test-race     # with -race and coverage
 make lint          # gofmt check + go vet
+make lint-full     # the golangci-lint set CI runs
 make build
 ```
 
 There are no runtime dependencies beyond `spf13/cobra`. Tests run entirely
 against `httptest` servers — nothing touches the real DigiKey API.
 
+CI runs formatting, `go mod tidy` verification, `go vet`, `go test -race`, and
+golangci-lint on every push and pull request.
+
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE). Use it however you like; it comes with no
+warranty.

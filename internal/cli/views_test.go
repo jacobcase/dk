@@ -156,14 +156,8 @@ func TestPriceBreaksPrefersMyPricing(t *testing.T) {
 	if len(breaks) != 1 || breaks[0].UnitPrice != 0.25 {
 		t.Errorf("priceBreakViews() = %+v, want the MyPricing tier", breaks)
 	}
-	if got := lowestUnitPrice(v); got != 0.25 {
-		t.Errorf("lowestUnitPrice() = %v, want 0.25", got)
-	}
-}
-
-func TestLowestUnitPriceWithNoPricing(t *testing.T) {
-	if got := lowestUnitPrice(digikey.ProductVariation{}); got != 0 {
-		t.Errorf("lowestUnitPrice() = %v, want 0 for a variation with no pricing", got)
+	if got := v.LowestUnitPrice(); got != 0.25 {
+		t.Errorf("LowestUnitPrice() = %v, want 0.25", got)
 	}
 }
 
@@ -250,6 +244,10 @@ func TestFlattenCategories(t *testing.T) {
 	}
 }
 
+// testFilterIndex supplies the labels matchNamedID puts in its error messages;
+// the lookup is never called because these tests pass the index directly.
+var testFilterIndex = filterIndex{kind: "manufacturer", command: "manufacturers"}
+
 func TestMatchNamedID(t *testing.T) {
 	index := []digikey.NamedID{
 		{ID: 1, Name: "Murata Electronics"},
@@ -271,7 +269,7 @@ func TestMatchNamedID(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := matchNamedID(tt.input, index, "manufacturer")
+			got, err := matchNamedID(tt.input, index, testFilterIndex)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("matchNamedID(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
 			}
@@ -288,7 +286,7 @@ func TestMatchNamedIDExactBeatsSubstring(t *testing.T) {
 		{ID: 2, Name: "TDK Corporation"},
 	}
 	// "TDK" is a substring of both, but it exactly names the first.
-	got, err := matchNamedID("TDK", index, "manufacturer")
+	got, err := matchNamedID("TDK", index, testFilterIndex)
 	if err != nil {
 		t.Fatalf("matchNamedID() error = %v", err)
 	}

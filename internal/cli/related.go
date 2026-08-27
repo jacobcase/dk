@@ -10,17 +10,16 @@ import (
 )
 
 // RelatedProduct is one product related to the one asked about.
+//
+// The embedded SummaryView is the same shape `dk product --alternate-packaging`
+// and `--substitutes` return, because all three wrap DigiKey's ProductSummary.
+// Sharing it is what keeps them from drifting apart; the embedding is inlined
+// by encoding/json, so the JSON stays flat.
 type RelatedProduct struct {
 	// Relation is why this product is listed: mating, kit, accessory, or
 	// for-use-with.
-	Relation               string `json:"relation"`
-	DigiKeyPartNumber      string `json:"digikey_part_number"`
-	ManufacturerPartNumber string `json:"manufacturer_part_number,omitempty"`
-	Manufacturer           string `json:"manufacturer,omitempty"`
-	Description            string `json:"description,omitempty"`
-	UnitPrice              string `json:"unit_price,omitempty"`
-	QuantityAvailable      int    `json:"quantity_available"`
-	ProductURL             string `json:"product_url,omitempty"`
+	Relation string `json:"relation"`
+	SummaryView
 }
 
 // RelatedResult is the JSON shape of `dk related`.
@@ -96,7 +95,14 @@ all, which is a valid empty result rather than an error.`,
 				return err
 			}
 
-			result := RelatedResult{PartNumber: partNumber, Counts: map[string]int{}}
+			// Products starts as an empty slice, not nil: most parts have no
+			// associations, and the guide calls that a normal result, so it must
+			// serialize as [] rather than null.
+			result := RelatedResult{
+				PartNumber: partNumber,
+				Products:   []RelatedProduct{},
+				Counts:     map[string]int{},
+			}
 			for _, rk := range relationKinds {
 				if kind != "" && kind != "all" && kind != rk.Key {
 					continue
@@ -105,14 +111,8 @@ all, which is a valid empty result rather than an error.`,
 				result.Counts[rk.Key] = len(items)
 				for _, p := range items {
 					result.Products = append(result.Products, RelatedProduct{
-						Relation:               rk.Label,
-						DigiKeyPartNumber:      p.DigiKeyProductNumber,
-						ManufacturerPartNumber: p.ManufacturerProductNumber,
-						Manufacturer:           p.Manufacturer.Name,
-						Description:            p.Description,
-						UnitPrice:              p.UnitPrice,
-						QuantityAvailable:      p.QuantityAvailable,
-						ProductURL:             p.ProductURL,
+						Relation:    rk.Label,
+						SummaryView: newSummaryView(p),
 					})
 				}
 			}

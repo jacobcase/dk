@@ -2,6 +2,7 @@ package digikey
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -22,6 +23,11 @@ const (
 
 // ErrListNotFound is returned when a list name or id does not resolve.
 var ErrListNotFound = errors.New("list not found")
+
+// ErrListRefRequired is returned when the list name-or-id argument is blank.
+// It is distinct from ErrListNotFound because an empty argument is a bad
+// invocation, not a missing list, and the two carry different exit codes.
+var ErrListRefRequired = errors.New("list name or id is required")
 
 // ErrAmbiguousList is returned when a list name matches more than one list.
 type ErrAmbiguousList struct {
@@ -109,20 +115,61 @@ type ListSummary struct {
 	CanEdit          bool            `json:"CanEdit"`
 }
 
+// ListPackOption is one packaging choice DigiKey priced for a quantity line.
+// A line carries every option (cut tape, tape & reel, digi-reel) and names the
+// one that applies in ListPartQuantity.SelectedPackType.
+type ListPackOption struct {
+	DigiKeyPartNumber   string  `json:"DigiKeyPartNumber"`
+	PackType            string  `json:"PackType"`
+	Quantity            int     `json:"Quantity"`
+	QuantityAvailable   int     `json:"QuantityAvailable"`
+	CalculatedUnitPrice float64 `json:"CalculatedUnitPrice"`
+	ExtendedPrice       float64 `json:"ExtendedPrice"`
+}
+
 // ListPartQuantity is the resolved quantity/pricing for a part in a list.
 type ListPartQuantity struct {
-	QuantityRequested  int     `json:"QuantityRequested"`
-	CalculatedQuantity int     `json:"CalculatedQuantity"`
-	TargetPrice        float64 `json:"TargetPrice"`
-	SelectedPackType   string  `json:"SelectedPackType"`
-	PackOptions        []struct {
-		DigiKeyPartNumber   string  `json:"DigiKeyPartNumber"`
-		PackType            string  `json:"PackType"`
-		Quantity            int     `json:"Quantity"`
-		QuantityAvailable   int     `json:"QuantityAvailable"`
-		CalculatedUnitPrice float64 `json:"CalculatedUnitPrice"`
-		ExtendedPrice       float64 `json:"ExtendedPrice"`
-	} `json:"PackOptions"`
+	QuantityRequested  int              `json:"QuantityRequested"`
+	CalculatedQuantity int              `json:"CalculatedQuantity"`
+	TargetPrice        float64          `json:"TargetPrice"`
+	SelectedPackType   string           `json:"SelectedPackType"`
+	PackOptions        []ListPackOption `json:"PackOptions"`
+}
+
+// SelectedPackOption returns the pack option that applies to this quantity
+// line, and false when the line has no options at all.
+//
+// Matching on SelectedPackType is the whole point: taking the first priced
+// option instead would quote a reel price for a line the user set to cut tape,
+// and that price flows straight into the BOM total a human buys from.
+//
+// When the named pack type IS present but DigiKey did not price it, this
+// returns it anyway, with its zero price. That is deliberate. Falling through
+// to some other pack type's price would re-introduce exactly the defect above —
+// quoting a figure for a product the user did not choose — and a zero here is
+// visible: callers surface it as an unpriced line rather than a cheap one.
+// The fallback below therefore only covers a line whose SelectedPackType is
+// absent from PackOptions entirely, or empty.
+func (q ListPartQuantity) SelectedPackOption() (ListPackOption, bool) {
+	if want := strings.TrimSpace(q.SelectedPackType); want != "" {
+		for _, opt := range q.PackOptions {
+			if strings.EqualFold(strings.TrimSpace(opt.PackType), want) {
+				return opt, true
+			}
+		}
+	}
+	// DigiKey named no pack type, or named one it did not return an option for.
+	for _, opt := range q.PackOptions {
+		if opt.CalculatedUnitPrice > 0 || opt.ExtendedPrice > 0 {
+			return opt, true
+		}
+	}
+	// Nothing priced: return the first option so the pack type is still
+	// reported, or the zero value when there are no options at all.
+	if len(q.PackOptions) > 0 {
+		return q.PackOptions[0], true
+	}
+	return ListPackOption{}, false
 }
 
 // ListPart is a fully resolved part in a list, including live availability.
@@ -169,29 +216,46 @@ func (p ListPart) RequestedQty() int {
 	return total
 }
 
-// UnitPrice returns the unit price of the selected pack option, or 0 if DigiKey
-// did not resolve one (e.g. an unmatched part number).
-func (p ListPart) UnitPrice() float64 {
+// pricedLines sums the selected pack option across every quantity line.
+//
+// RequestedQty already sums all lines, so the money has to as well: reporting
+// one line's extended price next to every line's quantity would understate the
+// cost of a part that carries more than one line.
+func (p ListPart) pricedLines() (extended float64, quantity int, firstUnit float64, lines int) {
 	for _, q := range p.Quantities {
-		for _, opt := range q.PackOptions {
-			if opt.CalculatedUnitPrice > 0 {
-				return opt.CalculatedUnitPrice
-			}
+		opt, ok := q.SelectedPackOption()
+		if !ok {
+			continue
 		}
+		if lines == 0 {
+			firstUnit = opt.CalculatedUnitPrice
+		}
+		lines++
+		extended += opt.ExtendedPrice
+		quantity += q.QuantityRequested
 	}
-	return 0
+	return extended, quantity, firstUnit, lines
 }
 
-// ExtendedPrice returns the line total for this part, or 0 if unresolved.
-func (p ListPart) ExtendedPrice() float64 {
-	for _, q := range p.Quantities {
-		for _, opt := range q.PackOptions {
-			if opt.ExtendedPrice > 0 {
-				return opt.ExtendedPrice
-			}
-		}
+// UnitPrice returns the unit price of the selected pack option, or 0 if DigiKey
+// did not resolve one (e.g. an unmatched part number).
+//
+// With the usual single quantity line this is that line's price. With several,
+// it is the quantity-weighted average, so UnitPrice multiplied by RequestedQty
+// still agrees with ExtendedPrice.
+func (p ListPart) UnitPrice() float64 {
+	extended, quantity, firstUnit, lines := p.pricedLines()
+	if lines <= 1 || extended <= 0 || quantity <= 0 {
+		return firstUnit
 	}
-	return 0
+	return extended / float64(quantity)
+}
+
+// ExtendedPrice returns the line total for this part, summed across every
+// quantity line, or 0 if unresolved.
+func (p ListPart) ExtendedPrice() float64 {
+	extended, _, _, _ := p.pricedLines()
+	return extended
 }
 
 // PartsResponse is the GetPartsByListId result.
@@ -222,6 +286,33 @@ func (c *Client) Lists(ctx context.Context, startIndex, limit int) ([]ListSummar
 		return nil, err
 	}
 	return out, nil
+}
+
+// Paging bounds for AllLists. DigiKey's default page size is smaller than this
+// and undocumented, which is why resolving a name cannot trust one request.
+// maxListPages guards against a server that ignores startIndex and would
+// otherwise make the loop run forever.
+const (
+	listPageSize = 100
+	maxListPages = 50
+)
+
+// AllLists returns every list the account owns, paging until DigiKey returns a
+// short page. Resolving a list by name needs the complete set: a list on page
+// two is otherwise indistinguishable from one that does not exist.
+func (c *Client) AllLists(ctx context.Context) ([]ListSummary, error) {
+	var all []ListSummary
+	for page := 0; page < maxListPages; page++ {
+		batch, err := c.Lists(ctx, page*listPageSize, listPageSize)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, batch...)
+		if len(batch) < listPageSize {
+			return all, nil
+		}
+	}
+	return nil, fmt.Errorf("digikey returned more than %d lists; refusing to page further", listPageSize*maxListPages)
 }
 
 // GetList returns a list's metadata and requested parts by id.
@@ -289,24 +380,6 @@ func (c *Client) RenameList(ctx context.Context, listID, newName string) error {
 	})
 }
 
-// IsValidListName reports whether a list name is still available.
-func (c *Client) IsValidListName(ctx context.Context, name string) (bool, error) {
-	if strings.TrimSpace(name) == "" {
-		return false, errors.New("list name is required")
-	}
-	var ok bool
-	err := c.do(ctx, request{
-		method:      "GET",
-		path:        myListsBasePath + "/lists/validate/" + url.PathEscape(name),
-		requireUser: true,
-		out:         &ok,
-	})
-	if err != nil {
-		return false, err
-	}
-	return ok, nil
-}
-
 // SuggestListName returns name if it is free, or a de-duplicated variant.
 func (c *Client) SuggestListName(ctx context.Context, name string) (string, error) {
 	if strings.TrimSpace(name) == "" {
@@ -325,12 +398,9 @@ func (c *Client) SuggestListName(ctx context.Context, name string) (string, erro
 	return suggested, nil
 }
 
-// ListParts returns resolved parts (with live pricing and stock) for a list.
-func (c *Client) ListParts(ctx context.Context, listID string, startIndex, limit int, locale Locale) (*PartsResponse, error) {
-	if strings.TrimSpace(listID) == "" {
-		return nil, errors.New("list id is required")
-	}
-	// This endpoint takes locale as query parameters rather than headers.
+// listPartsQuery builds the parts-endpoint query. Unlike the rest of MyLists,
+// this endpoint takes locale as query parameters rather than headers.
+func listPartsQuery(startIndex, limit int, locale Locale) url.Values {
 	q := url.Values{}
 	if locale.Site != "" {
 		q.Set("countryIso", locale.Site)
@@ -347,12 +417,19 @@ func (c *Client) ListParts(ctx context.Context, listID string, startIndex, limit
 	if limit > 0 {
 		q.Set("limit", strconv.Itoa(limit))
 	}
+	return q
+}
 
+// ListParts returns resolved parts (with live pricing and stock) for a list.
+func (c *Client) ListParts(ctx context.Context, listID string, startIndex, limit int, locale Locale) (*PartsResponse, error) {
+	if strings.TrimSpace(listID) == "" {
+		return nil, errors.New("list id is required")
+	}
 	var out PartsResponse
 	err := c.do(ctx, request{
 		method:      "GET",
 		path:        myListsBasePath + "/lists/" + url.PathEscape(listID) + "/parts",
-		query:       q,
+		query:       listPartsQuery(startIndex, limit, locale),
 		requireUser: true,
 		out:         &out,
 	})
@@ -360,6 +437,105 @@ func (c *Client) ListParts(ctx context.Context, listID string, startIndex, limit
 		return nil, err
 	}
 	return &out, nil
+}
+
+// Paging bounds for AllListParts, mirroring the list-level pair above.
+//
+// maxPartPages is generous because DigiKey may cap a page below partsPageSize,
+// which costs iterations without costing parts: a 25-part cap on a 5000-part
+// list needs 200 requests. Exhausting it is an error rather than a short
+// result — silently returning a truncated list is the failure this whole
+// function exists to prevent.
+const (
+	partsPageSize = 100
+	maxPartPages  = 500
+)
+
+// AllListParts returns every part in a list, paging until DigiKey returns a
+// short page.
+//
+// The same argument as AllLists applies, and costs more here: a part on page
+// two is indistinguishable from one that is absent, so `dk list rm` would
+// report a part it can see in the web UI as not found. Worse, `dk list export`
+// would write a BOM missing everything past the first page — silently, since
+// TotalParts would still report the full count.
+func (c *Client) AllListParts(ctx context.Context, listID string, locale Locale) (*PartsResponse, error) {
+	all := &PartsResponse{PartsList: []ListPart{}}
+	seen := make(map[string]bool)
+	done := false
+
+	for range maxPartPages {
+		// Resume from what we actually hold rather than from page*pageSize.
+		// DigiKey is free to return fewer rows than the limit asks for, and if
+		// it caps pages below partsPageSize then treating a short page as the
+		// end of the list truncates the BOM on the very first request — the bug
+		// this function exists to prevent.
+		batch, err := c.ListParts(ctx, listID, len(all.PartsList), partsPageSize, locale)
+		if err != nil {
+			return nil, err
+		}
+		if batch.TotalParts > all.TotalParts {
+			all.TotalParts = batch.TotalParts
+		}
+
+		// Count only rows we have not already seen. A server that ignores
+		// startIndex resends the same page forever; without this the loop would
+		// pile up duplicates until the page cap.
+		added := 0
+		for _, p := range batch.PartsList {
+			if p.UniqueID != "" {
+				if seen[p.UniqueID] {
+					continue
+				}
+				seen[p.UniqueID] = true
+			}
+			all.PartsList = append(all.PartsList, p)
+			added++
+		}
+
+		// No new rows means the list ended, or the server is not paging at all.
+		// Either way there is nothing further to fetch.
+		if added == 0 || (all.TotalParts > 0 && len(all.PartsList) >= all.TotalParts) {
+			done = true
+			break
+		}
+	}
+
+	if !done {
+		return nil, fmt.Errorf("digikey did not finish paging list %s after %d requests (%d parts so far)",
+			listID, maxPartPages, len(all.PartsList))
+	}
+
+	// TotalParts can lag or be omitted; never report fewer than we hold.
+	if all.TotalParts < len(all.PartsList) {
+		all.TotalParts = len(all.PartsList)
+	}
+	return all, nil
+}
+
+// RawListParts returns one page of a list's parts exactly as DigiKey sent it.
+//
+// The flattened ListPartView deliberately hides the pack-option machinery, so
+// this is the only way to see SelectedPackType and PackOptions[].PackType as
+// DigiKey actually spells them — which is what `dk list show --raw` exists to
+// expose. Same reasoning as RawKeywordSearch: decoding and re-encoding would
+// drop whatever these structs do not model.
+func (c *Client) RawListParts(ctx context.Context, listID string, startIndex, limit int, locale Locale) (json.RawMessage, error) {
+	if strings.TrimSpace(listID) == "" {
+		return nil, ErrListRefRequired
+	}
+	var out json.RawMessage
+	err := c.do(ctx, request{
+		method:      "GET",
+		path:        myListsBasePath + "/lists/" + url.PathEscape(listID) + "/parts",
+		query:       listPartsQuery(startIndex, limit, locale),
+		requireUser: true,
+		out:         &out,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // AddParts appends parts to a list and returns the unique ids DigiKey assigned,
@@ -383,36 +559,6 @@ func (c *Client) AddParts(ctx context.Context, listID string, parts []RequestedP
 		return nil, err
 	}
 	return ids, nil
-}
-
-// GetPart returns one resolved part from a list by its unique id.
-func (c *Client) GetPart(ctx context.Context, listID, uniqueID string, locale Locale) (*ListPart, error) {
-	if strings.TrimSpace(listID) == "" || strings.TrimSpace(uniqueID) == "" {
-		return nil, errors.New("list id and unique id are required")
-	}
-	q := url.Values{}
-	if locale.Site != "" {
-		q.Set("countryIso", locale.Site)
-	}
-	if locale.Currency != "" {
-		q.Set("currencyIso", locale.Currency)
-	}
-	if locale.Language != "" {
-		q.Set("languageIso", locale.Language)
-	}
-
-	var out ListPart
-	err := c.do(ctx, request{
-		method:      "GET",
-		path:        myListsBasePath + "/lists/" + url.PathEscape(listID) + "/parts/" + url.PathEscape(uniqueID),
-		query:       q,
-		requireUser: true,
-		out:         &out,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &out, nil
 }
 
 // UpdatePart replaces a part line in a list. DigiKey expects the full
@@ -449,10 +595,10 @@ func (c *Client) DeletePart(ctx context.Context, listID, uniqueID string) error 
 func (c *Client) ResolveList(ctx context.Context, nameOrID string) (*ListSummary, error) {
 	nameOrID = strings.TrimSpace(nameOrID)
 	if nameOrID == "" {
-		return nil, errors.New("list name or id is required")
+		return nil, ErrListRefRequired
 	}
 
-	lists, err := c.Lists(ctx, 0, 0)
+	lists, err := c.AllLists(ctx)
 	if err != nil {
 		return nil, err
 	}

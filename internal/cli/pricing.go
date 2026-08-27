@@ -38,7 +38,11 @@ type PricingResult struct {
 	Currency          string `json:"currency,omitempty"`
 	// Best is the cheapest in-stock option, which is what most callers want.
 	// It is nil when nothing is in stock.
-	Best    *PackagingOption  `json:"best,omitempty"`
+	//
+	// Deliberately not omitempty: the guide documents this key as
+	// `{...} | null`, and a caller testing `.best === null` must not instead
+	// find the key missing entirely.
+	Best    *PackagingOption  `json:"best"`
 	Options []PackagingOption `json:"options"`
 }
 
@@ -87,6 +91,7 @@ account-specific pricing is used instead of list pricing.`,
 				PartNumber:        partNumber,
 				RequestedQuantity: quantity,
 				Currency:          app.Cfg.Locale.Currency,
+				Options:           []PackagingOption{},
 			}
 
 			for _, p := range resp.Products {

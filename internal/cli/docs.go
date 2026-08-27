@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -86,7 +87,11 @@ where it landed. Existing files are left alone unless --overwrite is passed.`,
 				return err
 			}
 
-			result := DocsResult{PartNumber: partNumber}
+			result := DocsResult{PartNumber: partNumber, Documents: []DocumentView{}}
+			// Two documents on one product routinely share a basename
+			// ("datasheet.pdf"). Without disambiguation the second overwrites the
+			// first and both are reported as written.
+			taken := map[string]int{}
 			for _, link := range links {
 				u := normalizeMediaURL(link.URL)
 				if u == "" {
@@ -99,7 +104,7 @@ where it landed. Existing files are left alone unless --overwrite is passed.`,
 					Type:     link.MediaType,
 					Title:    link.Title,
 					URL:      u,
-					Filename: documentFilename(u, link.Title),
+					Filename: uniqueFilename(documentFilename(u, link.Title), taken),
 				})
 			}
 
@@ -115,7 +120,7 @@ where it landed. Existing files are left alone unless --overwrite is passed.`,
 				if err := os.MkdirAll(download, 0o755); err != nil {
 					return fmt.Errorf("create download directory: %w", err)
 				}
-				httpc := app.httpClient()
+				httpc := app.downloadClient()
 				for i := range result.Documents {
 					doc := &result.Documents[i]
 					dest := filepath.Join(download, doc.Filename)
@@ -136,6 +141,13 @@ where it landed. Existing files are left alone unless --overwrite is passed.`,
 			if download != "" {
 				app.Printer.PrintText("\nDownloaded %d of %d document(s) into %s.",
 					result.Downloaded, len(result.Documents), download)
+			}
+			// An interrupt aborts the transfers, but each failure is recorded
+			// per-document rather than returned, so without this check Ctrl-C
+			// would exit 0 on a half-done job — or report the generic "error"
+			// code when nothing finished. Cancellation has its own code.
+			if err := ctx.Err(); err != nil {
+				return err
 			}
 			// Surface partial failure rather than exiting 0 on a half-done job.
 			if download != "" && result.Downloaded == 0 {
@@ -224,6 +236,39 @@ func documentFilename(rawURL, title string) string {
 	return name
 }
 
+// uniqueFilename returns name, or a variant with "-2", "-3" ... inserted before
+// the extension when an earlier document already claimed it.
+//
+// Keys are lowercased because the filesystems this most often lands on (APFS,
+// NTFS) are case-insensitive: "Datasheet.pdf" and "datasheet.pdf" are the same
+// file there, and treating them as distinct would reintroduce the overwrite.
+func uniqueFilename(name string, taken map[string]int) string {
+	key := strings.ToLower(name)
+	n, clash := taken[key]
+	if !clash {
+		taken[key] = 1
+		return name
+	}
+
+	ext := path.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	for {
+		n++
+		candidate := fmt.Sprintf("%s-%d%s", stem, n, ext)
+		ck := strings.ToLower(candidate)
+		if _, exists := taken[ck]; !exists {
+			taken[key] = n
+			taken[ck] = 1
+			return candidate
+		}
+	}
+}
+
+// maxFilenameBytes bounds a derived filename. Most filesystems cap a single
+// path element at 255 bytes; this leaves room for the "-2" disambiguation
+// suffix uniqueFilename may add.
+const maxFilenameBytes = 120
+
 // sanitizeFilename strips directory structure and characters that are unsafe or
 // awkward in a filename, leaving a single harmless path element.
 func sanitizeFilename(name string) string {
@@ -247,12 +292,24 @@ func sanitizeFilename(name string) string {
 	}
 	name = strings.Trim(b.String(), " .")
 
-	// "." and ".." reduce to empty here, which the caller replaces.
+	// Cut on a rune boundary. Slicing bytes can land mid-rune, and the invalid
+	// UTF-8 that produces is rejected outright by APFS.
+	if len(name) > maxFilenameBytes {
+		var cut strings.Builder
+		for _, r := range name {
+			if cut.Len()+utf8.RuneLen(r) > maxFilenameBytes {
+				break
+			}
+			cut.WriteRune(r)
+		}
+		// Truncation can expose a trailing dot or space, so re-trim.
+		name = strings.Trim(cut.String(), " .")
+	}
+
+	// "." and ".." reduce to empty here, which the caller replaces. Checked
+	// after truncation, which can also empty the name.
 	if name == "" || name == "." || name == ".." {
 		return ""
-	}
-	if len(name) > 120 {
-		name = name[:120]
 	}
 	return name
 }
@@ -306,6 +363,18 @@ func downloadDocument(ctx context.Context, httpc *http.Client, rawURL, dest stri
 	}
 	if written == 0 {
 		return "", errors.New("document was empty")
+	}
+
+	// os.CreateTemp creates the file 0600. A datasheet is not a secret, and one
+	// that lands in a shared directory should look like every other download, so
+	// widen it before the rename. When replacing an existing file, keep the mode
+	// it already had rather than silently tightening it.
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(dest); err == nil {
+		mode = info.Mode().Perm()
+	}
+	if err := os.Chmod(tmpName, mode); err != nil {
+		return "", fmt.Errorf("set file mode: %w", err)
 	}
 
 	if err := os.Rename(tmpName, dest); err != nil {

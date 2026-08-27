@@ -47,6 +47,71 @@ type ProductView struct {
 	Variations  []VariationView  `json:"variations,omitempty"`
 }
 
+// SummaryView is the flattened form of DigiKey's compact ProductSummary, which
+// it returns from the association and alternate-packaging endpoints.
+//
+// It exists for the same reason ProductView does: DigiKey's shape is PascalCase
+// with the manufacturer nested one level down, and emitting it verbatim would
+// make one dk command's output look nothing like the next. Decoding into a view
+// also drops the phantom fields a partial payload would otherwise materialize
+// as empty strings. --raw is the escape hatch for the untouched payload.
+//
+// UnitPrice is a STRING here because DigiKey preformats it on these endpoints.
+// That is not unified with the numeric unit_price elsewhere: normalizing would
+// mean parsing currency-formatted text, and guessing wrong about money is worse
+// than making the caller notice the difference.
+type SummaryView struct {
+	DigiKeyPartNumber      string `json:"digikey_part_number"`
+	ManufacturerPartNumber string `json:"manufacturer_part_number,omitempty"`
+	Manufacturer           string `json:"manufacturer,omitempty"`
+	Description            string `json:"description,omitempty"`
+	UnitPrice              string `json:"unit_price,omitempty"`
+	QuantityAvailable      int    `json:"quantity_available"`
+	ProductURL             string `json:"product_url,omitempty"`
+}
+
+func newSummaryView(p digikey.ProductSummary) SummaryView {
+	return SummaryView{
+		DigiKeyPartNumber:      p.DigiKeyProductNumber,
+		ManufacturerPartNumber: p.ManufacturerProductNumber,
+		Manufacturer:           p.Manufacturer.Name,
+		Description:            p.Description,
+		UnitPrice:              p.UnitPrice,
+		QuantityAvailable:      p.QuantityAvailable,
+		ProductURL:             p.ProductURL,
+	}
+}
+
+func summaryViews(items []digikey.ProductSummary) []SummaryView {
+	out := make([]SummaryView, 0, len(items))
+	for _, p := range items {
+		out = append(out, newSummaryView(p))
+	}
+	return out
+}
+
+// SubstituteView is one substitute part: a SummaryView plus why DigiKey
+// considers it a substitute.
+type SubstituteView struct {
+	SubstituteType string `json:"substitute_type,omitempty"`
+	SummaryView
+}
+
+// RecommendedView is one "customers also bought" suggestion.
+//
+// Its unit_price is a NUMBER, unlike SummaryView's string — DigiKey returns it
+// that way on the recommendations endpoint. Same reasoning as above: the
+// inconsistency is DigiKey's and is reported rather than papered over.
+type RecommendedView struct {
+	DigiKeyPartNumber      string  `json:"digikey_part_number"`
+	ManufacturerPartNumber string  `json:"manufacturer_part_number,omitempty"`
+	Manufacturer           string  `json:"manufacturer,omitempty"`
+	Description            string  `json:"description,omitempty"`
+	UnitPrice              float64 `json:"unit_price"`
+	QuantityAvailable      int     `json:"quantity_available"`
+	ProductURL             string  `json:"product_url,omitempty"`
+}
+
 // PriceBreakView is one quantity-price tier.
 type PriceBreakView struct {
 	Quantity   int     `json:"quantity"`
@@ -101,7 +166,7 @@ func newProductView(p digikey.Product, currency string) ProductView {
 		v.Packaging = pv.PackageType.Name
 		v.MinimumOrderQuantity = pv.MinimumOrderQuantity
 		if v.UnitPrice == 0 {
-			v.UnitPrice = lowestUnitPrice(pv)
+			v.UnitPrice = pv.LowestUnitPrice()
 		}
 	}
 	if v.MinimumOrderQuantity == 0 {
@@ -129,7 +194,7 @@ func withDetails(v ProductView, p digikey.Product) ProductView {
 			Packaging:            variation.PackageType.Name,
 			QuantityAvailable:    variation.Stock(),
 			MinimumOrderQuantity: variation.MinimumOrderQuantity,
-			UnitPrice:            lowestUnitPrice(variation),
+			UnitPrice:            variation.LowestUnitPrice(),
 			MarketPlace:          variation.MarketPlace,
 			PriceBreaks:          priceBreakViews(variation),
 		})
@@ -137,36 +202,13 @@ func withDetails(v ProductView, p digikey.Product) ProductView {
 	return v
 }
 
-// priceBreaks returns account-specific pricing when a 3-legged token produced
-// it, otherwise standard pricing.
-func priceBreaks(v digikey.ProductVariation) []digikey.PriceBreak {
-	if len(v.MyPricing) > 0 {
-		return v.MyPricing
-	}
-	return v.StandardPricing
-}
-
 func priceBreakViews(v digikey.ProductVariation) []PriceBreakView {
-	breaks := priceBreaks(v)
+	breaks := v.Pricing()
 	out := make([]PriceBreakView, 0, len(breaks))
 	for _, b := range breaks {
 		out = append(out, PriceBreakView{Quantity: b.BreakQuantity, UnitPrice: b.UnitPrice, TotalPrice: b.TotalPrice})
 	}
 	return out
-}
-
-func lowestUnitPrice(v digikey.ProductVariation) float64 {
-	breaks := priceBreaks(v)
-	if len(breaks) == 0 {
-		return 0
-	}
-	best := breaks[0]
-	for _, b := range breaks[1:] {
-		if b.BreakQuantity < best.BreakQuantity {
-			best = b
-		}
-	}
-	return best.UnitPrice
 }
 
 // productTable renders product views as a table. descWidth caps the description
@@ -233,6 +275,17 @@ func detailPairs(v ProductView) [][2]string {
 		{"RoHS", v.RohsStatus},
 		{"Datasheet", v.DatasheetURL},
 		{"Product Page", v.ProductURL},
+	}
+
+	// Price breaks belong in this block rather than a second table: a product
+	// detail is one result, and a second table on the same stdout would be a
+	// second CSV document. KeyValueTable drops rows with an empty value, so
+	// breaks DigiKey did not quote fall out on their own.
+	for _, b := range v.PriceBreaks {
+		pairs = append(pairs, [2]string{
+			fmt.Sprintf("Price @ %d", b.Quantity),
+			priceWithCurrency(b.UnitPrice, v.Currency),
+		})
 	}
 	return pairs
 }

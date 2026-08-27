@@ -302,6 +302,37 @@ func TestPrimaryVariationPrefersCheapestInStock(t *testing.T) {
 	}
 }
 
+func TestPrimaryVariationIgnoresUnpricedVariations(t *testing.T) {
+	// DigiKey omits pricing on Marketplace and call-for-quote variations. A
+	// missing price must not read as a price of zero, or the part number dk
+	// tells a caller to order is the one it could not quote.
+	p := Product{ProductVariations: []ProductVariation{
+		{DigiKeyProductNumber: "PRICED", QuantityAvailableForPackageType: 100,
+			StandardPricing: []PriceBreak{{BreakQuantity: 1, UnitPrice: 0.10}}},
+		{DigiKeyProductNumber: "UNPRICED", QuantityAvailableForPackageType: 400, MarketPlace: true},
+	}}
+
+	got, ok := p.PrimaryVariation()
+	if !ok || got.DigiKeyProductNumber != "PRICED" {
+		t.Errorf("PrimaryVariation() = (%q, %v), want (PRICED, true)", got.DigiKeyProductNumber, ok)
+	}
+}
+
+func TestPrimaryVariationFallsBackToUnpricedWhenNothingIsQuoted(t *testing.T) {
+	// If DigiKey quoted nothing at all, an in-stock variation still beats an
+	// out-of-stock one: the caller gets an orderable part number and a blank
+	// price rather than neither.
+	p := Product{ProductVariations: []ProductVariation{
+		{DigiKeyProductNumber: "OUT-OF-STOCK"},
+		{DigiKeyProductNumber: "IN-STOCK", QuantityAvailableForPackageType: 5},
+	}}
+
+	got, ok := p.PrimaryVariation()
+	if !ok || got.DigiKeyProductNumber != "IN-STOCK" {
+		t.Errorf("PrimaryVariation() = (%q, %v), want (IN-STOCK, true)", got.DigiKeyProductNumber, ok)
+	}
+}
+
 func TestPrimaryVariationFallsBackWhenNothingInStock(t *testing.T) {
 	p := Product{ProductVariations: []ProductVariation{
 		{DigiKeyProductNumber: "FIRST"},

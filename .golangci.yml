@@ -1,0 +1,38 @@
+version: "2"
+
+linters:
+  enable:
+    # errcheck, govet, ineffassign, staticcheck, and unused are on by default.
+    - bodyclose     # an undrained response body leaks a connection
+    - errorlint     # %v on a wrapped error breaks errors.Is/As, which the exit codes depend on
+    - misspell
+    - revive        # exported-symbol doc comments, naming
+    - unconvert
+    - usestdlibvars # stdlib constants instead of string literals (http methods, statuses)
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+          arguments: [checkPrivateReceivers]
+
+    errcheck:
+      exclude-functions:
+        # Writing to stdout/stderr has no useful recovery path in a CLI: if the
+        # stream is gone, the error report cannot be delivered either.
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        # Deferred cleanup on paths that either already failed or only read.
+        # The one place a failed Close would lose data — the atomic write —
+        # checks it explicitly.
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (net.Listener).Close
+        - (*github.com/jacobcase/dk/internal/auth.CallbackServer).Close
+        - os.Remove
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

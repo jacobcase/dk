@@ -2,6 +2,8 @@ package digikey
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -200,25 +202,43 @@ type Product struct {
 }
 
 // PrimaryVariation returns the variation a buyer would most likely order: the
-// cheapest in-stock option, falling back to the first listed. Returns false
+// cheapest in-stock option DigiKey actually quoted a price for. Returns false
 // when the product has no variations.
+//
+// An unpriced variation is not a free one — DigiKey omits pricing for
+// Marketplace and call-for-quote items — so it loses to any priced variation
+// and is returned only when nothing in stock carries a price.
 func (p Product) PrimaryVariation() (ProductVariation, bool) {
 	if len(p.ProductVariations) == 0 {
 		return ProductVariation{}, false
 	}
-	best := -1
+
+	best, bestPrice := -1, 0.0
+	unpriced := -1 // in stock, but DigiKey quoted nothing
 	for i, v := range p.ProductVariations {
 		if v.Stock() <= 0 {
 			continue
 		}
-		if best < 0 || unitPriceOf(v) < unitPriceOf(p.ProductVariations[best]) {
-			best = i
+		price := v.LowestUnitPrice()
+		if price <= 0 {
+			if unpriced < 0 {
+				unpriced = i
+			}
+			continue
+		}
+		if best < 0 || price < bestPrice {
+			best, bestPrice = i, price
 		}
 	}
-	if best < 0 {
+
+	switch {
+	case best >= 0:
+		return p.ProductVariations[best], true
+	case unpriced >= 0:
+		return p.ProductVariations[unpriced], true
+	default:
 		return p.ProductVariations[0], true
 	}
-	return p.ProductVariations[best], true
 }
 
 // DigiKeyPartNumber returns the part number to order or add to a list.
@@ -229,13 +249,21 @@ func (p Product) DigiKeyPartNumber() string {
 	return ""
 }
 
-// unitPriceOf returns a variation's lowest-quantity unit price, preferring
-// account-specific pricing when the token was 3-legged.
-func unitPriceOf(v ProductVariation) float64 {
-	breaks := v.MyPricing
-	if len(breaks) == 0 {
-		breaks = v.StandardPricing
+// Pricing returns the account-specific price breaks when a 3-legged token
+// produced them, otherwise the standard ones.
+func (v ProductVariation) Pricing() []PriceBreak {
+	if len(v.MyPricing) > 0 {
+		return v.MyPricing
 	}
+	return v.StandardPricing
+}
+
+// LowestUnitPrice returns the unit price at the smallest quantity break, which
+// is the figure a buyer comparing variations wants. It returns 0 when DigiKey
+// quoted no price at all — Marketplace and call-for-quote items, which is not
+// the same as being free.
+func (v ProductVariation) LowestUnitPrice() float64 {
+	breaks := v.Pricing()
 	if len(breaks) == 0 {
 		return 0
 	}
@@ -377,10 +405,66 @@ func (c *Client) KeywordSearch(ctx context.Context, req KeywordRequest) (*Keywor
 	return &out, nil
 }
 
+// RawKeywordSearch runs a keyword search and returns DigiKey's response body
+// verbatim.
+//
+// It exists because `--raw` promises the untouched payload. Re-encoding a
+// decoded KeywordResponse would drop every field these structs do not model and
+// invent zero values for fields DigiKey never sent, which is precisely what a
+// caller reaching for --raw is trying to avoid.
+func (c *Client) RawKeywordSearch(ctx context.Context, req KeywordRequest) (json.RawMessage, error) {
+	var out json.RawMessage
+	err := c.do(ctx, request{
+		method: "POST",
+		path:   productsBasePath + "/search/keyword",
+		body:   req,
+		out:    &out,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Product endpoint suffixes that RawProductResponse will fetch.
+const (
+	RawProductDetails      = "productdetails"
+	RawProductSubstitutes  = "substitutions"
+	RawProductRecommended  = "recommendedproducts"
+	RawProductAltPackaging = "alternatepackaging"
+)
+
+// RawProductResponse fetches one per-product endpoint and returns DigiKey's
+// response body verbatim, for the same reason as RawKeywordSearch.
+//
+// endpoint is restricted to the Raw* constants above so a caller cannot use
+// this to assemble an arbitrary request path.
+func (c *Client) RawProductResponse(ctx context.Context, partNumber, endpoint string) (json.RawMessage, error) {
+	if strings.TrimSpace(partNumber) == "" {
+		return nil, errors.New("product number is required")
+	}
+	switch endpoint {
+	case RawProductDetails, RawProductSubstitutes, RawProductRecommended, RawProductAltPackaging:
+	default:
+		return nil, fmt.Errorf("digikey: unsupported raw product endpoint %q", endpoint)
+	}
+
+	var out json.RawMessage
+	err := c.do(ctx, request{
+		method: "GET",
+		path:   productsBasePath + "/search/" + url.PathEscape(partNumber) + "/" + endpoint,
+		out:    &out,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ProductDetails fetches full detail for a DigiKey or manufacturer part number.
 func (c *Client) ProductDetails(ctx context.Context, partNumber string) (*ProductDetails, error) {
 	if strings.TrimSpace(partNumber) == "" {
-		return nil, fmt.Errorf("product number is required")
+		return nil, errors.New("product number is required")
 	}
 	var out ProductDetails
 	err := c.do(ctx, request{
@@ -418,7 +502,7 @@ type ProductSubstitutesResponse struct {
 // preferred part is out of stock.
 func (c *Client) Substitutions(ctx context.Context, partNumber string) (*ProductSubstitutesResponse, error) {
 	if strings.TrimSpace(partNumber) == "" {
-		return nil, fmt.Errorf("product number is required")
+		return nil, errors.New("product number is required")
 	}
 	var out ProductSubstitutesResponse
 	err := c.do(ctx, request{
@@ -470,7 +554,7 @@ type ProductAssociationsResponse struct {
 // to a product. Works best with a DigiKey part number.
 func (c *Client) Associations(ctx context.Context, partNumber string) (*ProductAssociationsResponse, error) {
 	if strings.TrimSpace(partNumber) == "" {
-		return nil, fmt.Errorf("product number is required")
+		return nil, errors.New("product number is required")
 	}
 	var out ProductAssociationsResponse
 	err := c.do(ctx, request{
@@ -512,7 +596,7 @@ type RecommendedProductsResponse struct {
 // RecommendedProducts returns products commonly bought with this one.
 func (c *Client) RecommendedProducts(ctx context.Context, partNumber string) ([]Recommendation, error) {
 	if strings.TrimSpace(partNumber) == "" {
-		return nil, fmt.Errorf("product number is required")
+		return nil, errors.New("product number is required")
 	}
 	var out RecommendedProductsResponse
 	err := c.do(ctx, request{
@@ -540,7 +624,7 @@ type AlternatePackagingResponse struct {
 // numbers that are not listed as variations.
 func (c *Client) AlternatePackaging(ctx context.Context, partNumber string) ([]ProductSummary, error) {
 	if strings.TrimSpace(partNumber) == "" {
-		return nil, fmt.Errorf("product number is required")
+		return nil, errors.New("product number is required")
 	}
 	var out AlternatePackagingResponse
 	err := c.do(ctx, request{
@@ -608,10 +692,10 @@ type PackageTypeByQuantityResponse struct {
 // packagingPreference is optional; leave it empty for DigiKey's default.
 func (c *Client) PackageTypeByQuantity(ctx context.Context, partNumber string, requestedQuantity int, packagingPreference string) (*PackageTypeByQuantityResponse, error) {
 	if strings.TrimSpace(partNumber) == "" {
-		return nil, fmt.Errorf("product number is required")
+		return nil, errors.New("product number is required")
 	}
 	if requestedQuantity < 1 {
-		return nil, fmt.Errorf("requested quantity must be at least 1")
+		return nil, errors.New("requested quantity must be at least 1")
 	}
 
 	q := url.Values{"requestedQuantity": {strconv.Itoa(requestedQuantity)}}
@@ -656,7 +740,7 @@ type MediaResponse struct {
 // models) and costs a separate call.
 func (c *Client) Media(ctx context.Context, partNumber string) ([]MediaLink, error) {
 	if strings.TrimSpace(partNumber) == "" {
-		return nil, fmt.Errorf("product number is required")
+		return nil, errors.New("product number is required")
 	}
 	var out MediaResponse
 	err := c.do(ctx, request{

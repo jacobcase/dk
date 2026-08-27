@@ -10,8 +10,29 @@ import (
 
 // withConfigDir points config at a fresh temp directory for the duration of a
 // test, so tests never read or clobber the developer's real config.
+// digikeyEnvVars is every variable applyEnv consults. Keep it in sync with
+// that function: a new variable left out here would let a developer's real
+// credentials leak into these tests and quietly change what they assert.
+var digikeyEnvVars = []string{
+	"DIGIKEY_CLIENT_ID",
+	"DIGIKEY_CLIENT_SECRET",
+	"DIGIKEY_ENV",
+	"DIGIKEY_REDIRECT_URI",
+	"DIGIKEY_ACCOUNT_ID",
+	"DIGIKEY_LOCALE_SITE",
+	"DIGIKEY_LOCALE_LANGUAGE",
+	"DIGIKEY_LOCALE_CURRENCY",
+	"DIGIKEY_API_BASE_URL",
+}
+
+// withConfigDir points config at a temp dir and clears the ambient DigiKey
+// environment, so these tests describe the code rather than the machine they
+// run on. t.Setenv restores the previous values at cleanup.
 func withConfigDir(t *testing.T) string {
 	t.Helper()
+	for _, key := range digikeyEnvVars {
+		t.Setenv(key, "")
+	}
 	dir := t.TempDir()
 	t.Setenv("DK_CONFIG_DIR", dir)
 	return dir

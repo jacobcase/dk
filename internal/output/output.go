@@ -8,6 +8,7 @@ package output
 import (
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -119,11 +120,15 @@ func Cell(v any) string {
 	return strings.TrimSpace(s)
 }
 
-// Money formats a price for display. Prices of exactly zero usually mean
-// "DigiKey did not quote one", so they render as a dash rather than $0.00.
+// Money formats a price. Prices of exactly zero usually mean "DigiKey did not
+// quote one", so they render as blank rather than 0.0000 — a distinction that
+// matters when deciding whether a part is orderable.
+//
+// Blank rather than a dash because these columns also reach CSV, where a
+// non-numeric placeholder in a price field breaks every consumer downstream.
 func Money(v float64) string {
 	if v == 0 {
-		return "-"
+		return ""
 	}
 	return fmt.Sprintf("%.4f", v)
 }
@@ -147,14 +152,18 @@ func Truncate(s string, n int) string {
 // Printer writes results in the resolved format.
 type Printer struct {
 	Format Format
-	Out    io.Writer
-	// NoTruncate disables column width limits in table format.
-	NoTruncate bool
+	// Out receives the result, and nothing else.
+	Out io.Writer
+	// Err receives the prose PrintText emits. Nil falls back to Out, so a
+	// zero-value Printer still prints somewhere.
+	Err io.Writer
 }
 
 // NewPrinter resolves format against out's TTY-ness and returns a Printer.
-func NewPrinter(format Format, out io.Writer) *Printer {
-	return &Printer{Format: format.Resolve(IsTTY(out)), Out: out}
+// Prose written by PrintText goes to errOut, keeping out free of everything
+// but the result.
+func NewPrinter(format Format, out, errOut io.Writer) *Printer {
+	return &Printer{Format: format.Resolve(IsTTY(out)), Out: out, Err: errOut}
 }
 
 // Print writes data as JSON, or table as a table/CSV, depending on the format.
@@ -166,12 +175,12 @@ func (p *Printer) Print(data any, table *Table) error {
 		return p.printJSON(data)
 	case FormatCSV:
 		if table == nil {
-			return fmt.Errorf("output: csv format requested but command produced no table")
+			return errors.New("output: csv format requested but command produced no table")
 		}
 		return p.printCSV(table)
 	default:
 		if table == nil {
-			return fmt.Errorf("output: table format requested but command produced no table")
+			return errors.New("output: table format requested but command produced no table")
 		}
 		return p.printTable(table)
 	}
@@ -226,13 +235,27 @@ func (p *Printer) printCSV(t *Table) error {
 }
 
 // PrintText writes a plain message, but only in human-readable formats. It is
-// for confirmations ("Created list X") that would otherwise pollute JSON
-// output consumed by another program.
+// for confirmations ("Created list X") that would otherwise pollute output
+// consumed by another program.
+//
+// It writes to Err, not Out. Suppressing it in JSON and CSV mode is not enough
+// on its own, because table mode can also be captured:
+// `dk list show --output table > parts.txt` would otherwise put a trailing
+// "Review and order at ..." in that file, which is the same violation of
+// "stdout carries only the result".
+//
+// (Without an explicit --output, redirecting stdout makes it a non-TTY and the
+// format resolves to JSON, where PrintText is suppressed anyway — so it is the
+// explicit-table case that this matters for.)
 func (p *Printer) PrintText(format string, args ...any) {
 	if p.Format == FormatJSON || p.Format == FormatCSV {
 		return
 	}
-	fmt.Fprintf(p.Out, format+"\n", args...)
+	w := p.Err
+	if w == nil {
+		w = p.Out
+	}
+	fmt.Fprintf(w, format+"\n", args...)
 }
 
 // KeyValueTable renders an ordered key/value view, used by detail commands.

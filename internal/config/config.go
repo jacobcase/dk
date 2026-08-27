@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/jacobcase/dk/internal/atomicfile"
 )
 
 // Environment names the DigiKey deployment a command talks to.
@@ -216,35 +218,7 @@ func Save(cfg Config) error {
 	}
 	data = append(data, '\n')
 
-	return writeFileAtomic(path, data, 0o600)
-}
-
-// writeFileAtomic writes data to path via a temporary file in the same
-// directory, then renames it into place.
-func writeFileAtomic(path string, data []byte, perm fs.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp*")
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-
-	if err := tmp.Chmod(perm); err != nil {
-		tmp.Close()
-		return fmt.Errorf("chmod temp file: %w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp file: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("rename into place: %w", err)
-	}
-	return nil
+	return atomicfile.Write(path, data, 0o600)
 }
 
 // Set assigns a config field by its dotted key name, as used by `dk config set`.

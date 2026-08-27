@@ -26,14 +26,6 @@ type TokenSource interface {
 	Token(ctx context.Context, requireUser bool) (string, error)
 }
 
-// TokenSourceFunc adapts a function to TokenSource.
-type TokenSourceFunc func(ctx context.Context, requireUser bool) (string, error)
-
-// Token implements TokenSource.
-func (f TokenSourceFunc) Token(ctx context.Context, requireUser bool) (string, error) {
-	return f(ctx, requireUser)
-}
-
 // Locale maps onto the X-DIGIKEY-Locale-* headers that select site, language,
 // and pricing currency.
 type Locale struct {
@@ -268,13 +260,25 @@ func (e *APIError) Message() string {
 	case e.ErrorDetails != "":
 		return e.ErrorDetails
 	case e.rawBody != "":
-		if len(e.rawBody) > 300 {
-			return e.rawBody[:300] + "..."
-		}
-		return e.rawBody
+		return truncate(e.rawBody, 300)
 	default:
 		return ""
 	}
+}
+
+// truncate bounds an error body so a DigiKey HTML error page does not become
+// the whole terminal. It counts runes, since a byte slice can land mid-rune and
+// produce mojibake in the one place a user is already confused.
+//
+// Deliberately not shared with the identical helper in package auth: making the
+// API client depend on another package for six lines would be a worse trade
+// than the duplication.
+func truncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "..."
 }
 
 // NotFound reports whether the error is a 404.

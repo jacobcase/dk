@@ -42,8 +42,11 @@ ERRORS IN JSON MODE
   Failures print a single object on stderr:
     {"error":{"code":"auth_required","message":"...","hint":"...","exit_code":3}}
   Branch on .error.code, not on the message text. Codes:
-    usage_error, credentials_missing, auth_required, not_found,
-    ambiguous_list, rate_limited, api_error, error
+    usage_error, credentials_missing, config_invalid, auth_required, not_found,
+    ambiguous_list, rate_limited, api_error, cancelled, error
+
+  Ctrl-C (or SIGTERM) exits 1 with code "cancelled", so an interrupted run is
+  distinguishable from a genuine failure.
 
 AUTHENTICATION
   Search commands need only a client id and secret (2-legged OAuth):
@@ -123,12 +126,34 @@ PARAMETRIC FILTERING
 PRODUCT DETAIL
   dk product <part-number> [--variations] [--parameters] [--substitutes]
                            [--recommended] [--alternate-packaging]
-  Accepts a DigiKey or manufacturer part number. In JSON mode the full view
-  (parameters, price breaks, variations) is always returned regardless of flags.
-  The view flags are mutually exclusive.
+  Accepts a DigiKey or manufacturer part number. The view flags are mutually
+  exclusive.
+
+  Plain, --variations, and --parameters all query the same endpoint, and in JSON
+  mode all three return the identical full view (parameters, price breaks,
+  variations) — the flag only picks which section the TABLE shows.
+
+  The other three flags query different endpoints and each returns its own
+  object, all in dk's snake_case:
     --substitutes          what you could buy INSTEAD of this part
+      {"part_number","substitutes":[{"substitute_type","digikey_part_number",
+       "manufacturer_part_number","manufacturer","description","unit_price",
+       "quantity_available","product_url"}],"count"}
     --recommended          what others bought alongside it
+      {"part_number","recommended":[{"digikey_part_number",
+       "manufacturer_part_number","manufacturer","description","unit_price",
+       "quantity_available","product_url"}]}
     --alternate-packaging  the same part in other packaging
+      {"part_number","packaging":[ ...same fields as substitutes, minus
+       substitute_type... ]}
+
+  unit_price is a preformatted STRING in --substitutes and
+  --alternate-packaging, and a NUMBER in --recommended. That mirrors DigiKey,
+  which returns the two differently; dk reports the difference rather than
+  parsing currency text to hide it. Check the type before doing arithmetic.
+
+  Add --raw to any of these to get DigiKey's untouched payload instead, in its
+  original PascalCase and including fields dk does not model.
 
 WHAT ELSE DO I NEED TO BUY?
   dk related <part-number> [--kind mating|kits|accessories|for-use-with|all]
@@ -180,7 +205,8 @@ DATASHEETS AND DOCUMENTS
 LISTS
   dk list ls                                  show all lists
   dk list create <name> [--tag T] [--auto-rename]
-  dk list show <list>                         parts with live pricing and stock
+  dk list show <list> [--limit N] [--offset N] [--raw]
+                                              parts with live pricing and stock
   dk list add <list> <part[:qty]>... [--qty N] [--ref R1,R2] [--note TEXT]
                                               [--from-json FILE|-] [--verify]
   dk list set <list> <unique-id-or-part> [--qty N] [--ref R] [--note TEXT]
@@ -194,6 +220,12 @@ LISTS
   <list> is a list NAME or a list ID. Names match exactly first, then
   case-insensitively; an ambiguous name is an error (code "ambiguous_list")
   with the candidate ids in .error.details.candidates.
+
+  "dk list show" and "dk list export" page through the whole list, so
+  estimated_total and the exported rows cover all of it. Passing --limit or
+  --offset to "dk list show" fetches a single page instead: compare .returned
+  against .total_parts to tell, and remember that estimated_total then covers
+  only the returned page.
 
   Bulk add with per-part metadata:
     echo '[{"part":"1276-1000-1-ND","quantity":10,"reference":"C1-C10",

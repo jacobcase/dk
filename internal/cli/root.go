@@ -8,7 +8,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -64,6 +63,18 @@ type App struct {
 // httpClient returns the shared HTTP client honoring --timeout.
 func (a *App) httpClient() *http.Client {
 	return &http.Client{Timeout: a.Timeout}
+}
+
+// downloadClient returns an HTTP client for fetching documents.
+//
+// --timeout bounds an API call, where a slow response means something is
+// wrong. A 100 MB CAD archive on a slow link is not wrong, so the total is
+// left unbounded and only the wait for the first byte is capped. Ctrl-C still
+// aborts the transfer, because the request carries the signal context.
+func (a *App) downloadClient() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ResponseHeaderTimeout = a.Timeout
+	return &http.Client{Transport: tr}
 }
 
 // Store returns the on-disk token cache.
@@ -138,6 +149,43 @@ func (a *App) Client() (*digikey.Client, error) {
 	}
 	a.client = client
 	return client, nil
+}
+
+// locale returns the DigiKey locale implied by the resolved configuration.
+func (a *App) locale() digikey.Locale {
+	return digikey.Locale{
+		Site:     a.Cfg.Locale.Site,
+		Language: a.Cfg.Locale.Language,
+		Currency: a.Cfg.Locale.Currency,
+	}
+}
+
+// checkRawFormat rejects --raw alongside an explicit --output that cannot
+// render a raw payload. Commands call it before touching the API, so a bad
+// invocation costs no request.
+//
+// flagOutput is empty unless --output was passed, so --raw wins silently over
+// an auto-resolved table — that is what makes `dk search --raw` work on a
+// terminal — and conflicts loudly with an explicit --output csv: a caller that
+// asked for CSV should be told, not handed JSON.
+func (a *App) checkRawFormat(raw bool) error {
+	if !raw {
+		return nil
+	}
+	// Already validated in setup, so a parse failure here is unreachable.
+	requested, _ := output.ParseFormat(a.flagOutput)
+	if requested != output.FormatAuto && requested != output.FormatJSON {
+		return usageErrorf("--raw emits DigiKey's unmodified JSON and cannot be combined with --output %s", requested)
+	}
+	return nil
+}
+
+// printRaw emits DigiKey's untouched payload. A raw response has no table or
+// CSV representation, so --raw always prints JSON, which is what its help text
+// promises; checkRawFormat has already rejected an explicit request for
+// anything else.
+func (a *App) printRaw(payload any) error {
+	return (&output.Printer{Format: output.FormatJSON, Out: a.Out}).Print(payload, nil)
 }
 
 // NewRootCommand builds the full command tree bound to app.
@@ -220,7 +268,16 @@ func (a *App) setup(cmd *cobra.Command) error {
 
 	cfg, err := config.Load()
 	if err != nil {
-		return &Error{Code: CodeError, Message: err.Error(), ExitCode: ExitConfig, Err: err}
+		// CodeConfig, not CodeError: exit 6 and the JSON code have to agree, or
+		// a caller branching on .error.code reaches a different conclusion than
+		// one branching on $?.
+		return &Error{
+			Code:     CodeConfig,
+			Message:  err.Error(),
+			Hint:     "Fix or remove the config file, or point DK_CONFIG_DIR at a different directory.",
+			ExitCode: ExitConfig,
+			Err:      err,
+		}
 	}
 
 	if a.flagClientID != "" {
@@ -255,8 +312,8 @@ func (a *App) setup(cmd *cobra.Command) error {
 	if err != nil {
 		return usageErrorf("%s", err.Error())
 	}
-	a.Format = format.Resolve(output.IsTTY(a.Out))
-	a.Printer = &output.Printer{Format: a.Format, Out: a.Out}
+	a.Printer = output.NewPrinter(format, a.Out, a.Err)
+	a.Format = a.Printer.Format
 
 	// Config changes invalidate anything already built from an earlier run
 	// (only relevant to in-process tests that reuse an App).
@@ -278,12 +335,6 @@ func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 		return ExitOK
 	}
 
-	// Context cancellation means the user hit Ctrl-C; report it quietly.
-	if errors.Is(err, context.Canceled) {
-		fmt.Fprintln(errOut, "Cancelled.")
-		return ExitError
-	}
-
 	cliErr := classify(err)
 	// Cobra rejects unknown commands, unparseable flags, wrong argument counts,
 	// and violated flag groups before any hook runs. Those are all invocation
@@ -292,10 +343,17 @@ func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 		cliErr.Code = CodeUsage
 		cliErr.ExitCode = ExitUsage
 	}
-	// The format is unset if the failure happened before setup completed.
+	// The format is unset if the failure happened before setup completed. Cobra
+	// still parsed the flags by then, so fall back to an explicit --output
+	// rather than to TTY detection: a caller that asked for JSON must not get a
+	// line of prose because the config file happened to be malformed.
 	format := app.Format
 	if format == "" || format == output.FormatAuto {
-		format = output.FormatAuto.Resolve(output.IsTTY(errOut))
+		if requested, perr := output.ParseFormat(app.flagOutput); perr == nil && requested != output.FormatAuto {
+			format = requested
+		} else {
+			format = output.FormatAuto.Resolve(output.IsTTY(errOut))
+		}
 	}
 	writeError(errOut, format, cliErr)
 	return cliErr.ExitCode

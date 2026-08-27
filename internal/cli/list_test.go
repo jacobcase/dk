@@ -122,6 +122,74 @@ func TestListLsUsesUserToken(t *testing.T) {
 	}
 }
 
+func TestListSetClearsAFieldWithAnEmptyValue(t *testing.T) {
+	m := newMockDigiKey(t)
+	m.handle("GET", "/mylists/v1/lists", http.StatusOK,
+		`[{"Id":"aaa-111","ListName":"Bench PSU rev A","TotalParts":1}]`)
+	m.handle("GET", "/mylists/v1/lists/aaa-111/parts", http.StatusOK,
+		`{"TotalParts":1,"PartsList":[{"UniqueId":"u1","DigiKeyPartNumber":"490-1532-1-ND"}]}`)
+	m.handle("GET", "/mylists/v1/lists/aaa-111", http.StatusOK,
+		`{"Id":"aaa-111","ListName":"Bench PSU rev A","PartsList":[
+		  {"UniqueId":"u1","RequestedPartNumber":"490-1532-1-ND","ReferenceDesignator":"C1-C10",
+		   "Notes":"keep me","Quantities":[{"Quantity":10}]}]}`)
+	m.handle("PUT", "/mylists/v1/lists/aaa-111/parts/u1", http.StatusOK, ``)
+
+	res := runAuthed(t, m, "list", "set", "Bench PSU rev A", "490-1532-1-ND", "--ref", "")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+
+	var sent map[string]any
+	for _, r := range m.requests {
+		if r.Method == http.MethodPut {
+			if err := json.Unmarshal([]byte(r.Body), &sent); err != nil {
+				t.Fatalf("update body is not json: %v", err)
+			}
+		}
+	}
+	// --ref "" has to mean "clear it". Reading an empty value as "unchanged"
+	// would leave a stale designator with no way to remove it.
+	if got, ok := sent["ReferenceDesignator"]; ok && got != "" {
+		t.Errorf("ReferenceDesignator = %v, want it cleared", got)
+	}
+	// Untouched fields still survive the read-modify-write.
+	if sent["Notes"] != "keep me" {
+		t.Errorf("Notes = %v, want the existing note preserved", sent["Notes"])
+	}
+}
+
+func TestListSetRejectsNoFlags(t *testing.T) {
+	// Checked before any request, so the mock needs no routes.
+	res := runAuthed(t, nil, "list", "set", "Bench PSU rev A", "490-1532-1-ND")
+	if res.Code != ExitUsage {
+		t.Errorf("exit code = %d, want %d\nstderr: %s", res.Code, ExitUsage, res.Stderr)
+	}
+}
+
+func TestListLsPages(t *testing.T) {
+	// The paging flags existed as variables long before they were registered,
+	// so assert they reach the wire rather than merely being accepted.
+	m := newMockDigiKey(t)
+	m.handle("GET", "/mylists/v1/lists", http.StatusOK, listsBody)
+
+	res := runAuthed(t, m, "list", "ls", "--limit", "5", "--offset", "10")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+
+	var query string
+	for _, r := range m.requests {
+		if r.Path == "/mylists/v1/lists" {
+			query = r.Query
+		}
+	}
+	for _, want := range []string{"limit=5", "startIndex=10"} {
+		if !strings.Contains(query, want) {
+			t.Errorf("lists query = %q, want it to contain %q", query, want)
+		}
+	}
+}
+
 func TestListCreate(t *testing.T) {
 	m := newMockDigiKey(t)
 	m.handle("POST", "/mylists/v1/lists", http.StatusOK, `"new-id-123"`)
@@ -547,6 +615,9 @@ func TestListRename(t *testing.T) {
 func TestListDeleteRefusesNonEmptyWithoutForce(t *testing.T) {
 	m := newMockDigiKey(t)
 	m.handle("GET", "/mylists/v1/lists", http.StatusOK, listsBody)
+	// The guard asks the parts endpoint rather than trusting the summary count,
+	// which lags a mutation.
+	m.handle("GET", "/mylists/v1/lists/aaa-111/parts", http.StatusOK, listPartsBody)
 
 	res := runAuthed(t, m, "list", "delete", "Bench PSU rev A")
 	if res.Code != ExitUsage {
@@ -567,12 +638,38 @@ func TestListDeleteRefusesNonEmptyWithoutForce(t *testing.T) {
 func TestListDeleteEmptyListWithoutForce(t *testing.T) {
 	m := newMockDigiKey(t)
 	m.handle("GET", "/mylists/v1/lists", http.StatusOK, listsBody)
+	m.handle("GET", "/mylists/v1/lists/bbb-222/parts", http.StatusOK,
+		`{"PartsList":[],"TotalParts":0}`)
 	m.handle("DELETE", "/mylists/v1/lists/bbb-222", http.StatusNoContent, "")
 
 	// The Audio Amp list has zero parts, so no confirmation is needed.
 	res := runAuthed(t, m, "list", "delete", "Audio Amp")
 	if res.Code != ExitOK {
 		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+}
+
+// The summary count from /lists lags a mutation, so a list that reports zero
+// parts there but is actually non-empty must still be protected. This is the
+// case that made the old guard unsafe: it would have deleted the list.
+func TestListDeleteGuardIgnoresStaleSummaryCount(t *testing.T) {
+	m := newMockDigiKey(t)
+	// "Audio Amp" (bbb-222) carries TotalParts: 0 in listsBody...
+	m.handle("GET", "/mylists/v1/lists", http.StatusOK, listsBody)
+	// ...but the parts endpoint, which is authoritative, says otherwise.
+	m.handle("GET", "/mylists/v1/lists/bbb-222/parts", http.StatusOK,
+		`{"PartsList":[{"UniqueId":"u-1","DigiKeyPartNumber":"296-1234-1-ND"}],"TotalParts":1}`)
+	m.handle("DELETE", "/mylists/v1/lists/bbb-222", http.StatusNoContent, "")
+
+	res := runAuthed(t, m, "list", "delete", "Audio Amp")
+	if res.Code != ExitUsage {
+		t.Fatalf("exit code = %d, want %d (stale zero must not authorize a delete)\nstderr: %s",
+			res.Code, ExitUsage, res.Stderr)
+	}
+	for _, r := range m.requests {
+		if r.Method == http.MethodDelete {
+			t.Error("a DELETE was issued for a list the parts endpoint reported as non-empty")
+		}
 	}
 }
 

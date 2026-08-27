@@ -28,10 +28,8 @@ func newTestStore(t *testing.T) *Store {
 // form values of each request so tests can assert on the grant type.
 type tokenServer struct {
 	*httptest.Server
-	calls  atomic.Int32
-	forms  []url.Values
-	status int
-	body   string
+	calls atomic.Int32
+	forms []url.Values
 }
 
 func newTokenServer(t *testing.T, handler func(ts *tokenServer, form url.Values) (int, string)) *tokenServer {
@@ -400,6 +398,48 @@ func TestUserTokenRejectedRefreshRequiresLogin(t *testing.T) {
 	if !strings.Contains(err.Error(), "refresh token revoked") {
 		t.Errorf("error %q should include DigiKey's explanation", err)
 	}
+
+	// The dead token has to be dropped. Left cached, `dk auth status` keeps
+	// reporting user_logged_in while every list command exits 3 — and an agent,
+	// which cannot run `dk auth login`, has no way to reconcile the two.
+	tok, err := NewStore(store.Path()).Get(KindUser, testEnv)
+	if err != nil {
+		t.Fatalf("reading the store after a rejected refresh: %v", err)
+	}
+	if tok != nil && (tok.AccessToken != "" || tok.RefreshToken != "") {
+		t.Errorf("revoked token survived in the cache: %+v", tok)
+	}
+}
+
+// A transient 5xx must NOT discard a refresh token that is probably still good;
+// doing so would turn a blip into a mandatory browser login.
+func TestUserTokenServerErrorKeepsRefreshToken(t *testing.T) {
+	ts := newTokenServer(t, func(*tokenServer, url.Values) (int, string) {
+		return http.StatusInternalServerError, `{"error":"server_error"}`
+	})
+
+	store := newTestStore(t)
+	if err := store.Put(KindUser, testEnv, &Token{
+		AccessToken: "stale", RefreshToken: "good", ExpiresAt: time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &Manager{
+		BaseURL: ts.URL, ClientID: "id", ClientSecret: "s",
+		Environment: testEnv, Store: store, HTTPClient: ts.Client(),
+	}
+	if _, err := m.UserToken(context.Background()); err == nil {
+		t.Fatal("UserToken() error = nil, want a server error")
+	}
+
+	tok, err := NewStore(store.Path()).Get(KindUser, testEnv)
+	if err != nil {
+		t.Fatalf("reading the store: %v", err)
+	}
+	if tok == nil || tok.RefreshToken != "good" {
+		t.Errorf("refresh token was discarded on a transient 5xx: %+v", tok)
+	}
 }
 
 func TestUserTokenServerErrorIsNotLoginRequired(t *testing.T) {
@@ -639,12 +679,12 @@ func TestNewErrorParsesBothPayloadShapes(t *testing.T) {
 		}
 	})
 	t.Run("non json", func(t *testing.T) {
-		e := newError(502, []byte("  Bad Gateway  "))
+		e := newError(http.StatusBadGateway, []byte("  Bad Gateway  "))
 		if e.rawBody != "Bad Gateway" {
 			t.Errorf("rawBody = %q, want the trimmed body", e.rawBody)
 		}
-		if e.StatusCode != 502 {
-			t.Errorf("StatusCode = %d, want 502", e.StatusCode)
+		if e.StatusCode != http.StatusBadGateway {
+			t.Errorf("StatusCode = %d, want %d", e.StatusCode, http.StatusBadGateway)
 		}
 	})
 }

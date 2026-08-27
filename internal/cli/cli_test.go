@@ -2,14 +2,18 @@ package cli
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/jacobcase/dk/internal/output"
 )
 
 // mockDigiKey is a stand-in for the DigiKey API and its OAuth endpoint. Handlers
@@ -118,22 +122,6 @@ func run(t *testing.T, m *mockDigiKey, args ...string) result {
 
 	var stdout, stderr strings.Builder
 	code := Execute(context.Background(), args, strings.NewReader(""), &stdout, &stderr)
-	return result{Code: code, Stdout: stdout.String(), Stderr: stderr.String()}
-}
-
-// runWithStdin is run() with stdin content, for --from-json -.
-func runWithStdin(t *testing.T, m *mockDigiKey, stdin string, args ...string) result {
-	t.Helper()
-
-	t.Setenv("DK_CONFIG_DIR", t.TempDir())
-	t.Setenv("DIGIKEY_CLIENT_ID", "test-id")
-	t.Setenv("DIGIKEY_CLIENT_SECRET", "test-secret")
-	if m != nil {
-		t.Setenv("DIGIKEY_API_BASE_URL", m.server.URL)
-	}
-
-	var stdout, stderr strings.Builder
-	code := Execute(context.Background(), args, strings.NewReader(stdin), &stdout, &stderr)
 	return result{Code: code, Stdout: stdout.String(), Stderr: stderr.String()}
 }
 
@@ -441,6 +429,62 @@ func TestProductDetail(t *testing.T) {
 	}
 }
 
+func TestProductCSVIsOneDocument(t *testing.T) {
+	m := newMockDigiKey(t)
+	m.handle("GET", "/products/v4/search/490-1532-1-ND/productdetails", http.StatusOK, productDetailsBody)
+
+	res := run(t, m, "product", "490-1532-1-ND", "--output", "csv")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+
+	// A second header row mid-stream makes the output unparseable, so price
+	// breaks must be rows in the one table rather than a table of their own.
+	records, err := csv.NewReader(strings.NewReader(res.Stdout)).ReadAll()
+	if err != nil {
+		t.Fatalf("stdout is not a single csv document: %v\nstdout: %s", err, res.Stdout)
+	}
+	for i, rec := range records[1:] {
+		if rec[0] == records[0][0] {
+			t.Errorf("row %d repeats the header %q; stdout holds more than one csv document:\n%s",
+				i+1, rec[0], res.Stdout)
+		}
+	}
+	if !strings.Contains(res.Stdout, "Price @ 1,") {
+		t.Errorf("price breaks are missing from csv output:\n%s", res.Stdout)
+	}
+}
+
+func TestRawConflictsWithNonJSONOutput(t *testing.T) {
+	// --raw has no table or csv rendering. Asking for one is a usage error
+	// naming the flag, not a generic failure from deep inside the printer —
+	// and it is caught before any request, so the mock registers no route.
+	for _, format := range []string{"table", "csv"} {
+		res := run(t, nil, "search", "cap", "--raw", "--output", format)
+		if res.Code != ExitUsage {
+			t.Errorf("search --raw --output %s exit code = %d, want %d\nstderr: %s",
+				format, res.Code, ExitUsage, res.Stderr)
+		}
+		if !strings.Contains(res.Stderr, "--raw") {
+			t.Errorf("search --raw --output %s error does not name --raw: %s", format, res.Stderr)
+		}
+	}
+}
+
+func TestPrintRawIgnoresAnAutoResolvedFormat(t *testing.T) {
+	// On a terminal --output resolves to table, which --raw cannot render.
+	// Because the format was inferred rather than requested, --raw wins: this
+	// is what makes `dk search ... --raw` work interactively.
+	var out strings.Builder
+	app := &App{Out: &out, Format: output.FormatTable}
+	if err := app.printRaw(map[string]string{"ProductsCount": "1"}); err != nil {
+		t.Fatalf("printRaw() error = %v", err)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(out.String()), "{") {
+		t.Errorf("printRaw() wrote %q, want json", out.String())
+	}
+}
+
 func TestProductNotFoundExitCode(t *testing.T) {
 	m := newMockDigiKey(t)
 	m.handle("GET", "/products/v4/search/NOSUCHPART/productdetails", http.StatusNotFound,
@@ -550,6 +594,33 @@ func TestListsRequireLoginExitCode(t *testing.T) {
 	}
 }
 
+func TestCancellationIsAStructuredError(t *testing.T) {
+	m := newMockDigiKey(t)
+	m.handle("POST", "/products/v4/search/keyword", http.StatusOK, searchResponseBody)
+
+	t.Setenv("DK_CONFIG_DIR", t.TempDir())
+	t.Setenv("DIGIKEY_CLIENT_ID", "test-id")
+	t.Setenv("DIGIKEY_CLIENT_SECRET", "test-secret")
+	t.Setenv("DIGIKEY_API_BASE_URL", m.server.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var stdout, stderr strings.Builder
+	code := Execute(ctx, []string{"search", "cap"}, strings.NewReader(""), &stdout, &stderr)
+	res := result{Code: code, Stdout: stdout.String(), Stderr: stderr.String()}
+
+	if res.Code != ExitError {
+		t.Fatalf("exit code = %d, want %d\nstderr: %s", res.Code, ExitError, res.Stderr)
+	}
+	// Ctrl-C used to print bare prose, which broke the promise that every
+	// failure in JSON mode is a parseable object on stderr.
+	p := res.ErrorJSON(t)
+	if p.Error.Code != CodeCancelled {
+		t.Errorf("error code = %q, want %q", p.Error.Code, CodeCancelled)
+	}
+}
+
 func TestGuideIsPlainTextRegardlessOfFormat(t *testing.T) {
 	for _, format := range []string{"json", "table", "csv"} {
 		res := run(t, nil, "guide", "--output", format)
@@ -566,13 +637,60 @@ func TestGuideIsPlainTextRegardlessOfFormat(t *testing.T) {
 	}
 }
 
-func TestGuideDocumentsEveryExitCode(t *testing.T) {
+// errorCodeValues extracts every Code* constant value declared in errors.go.
+//
+// Reading the source rather than listing the codes by hand is the point: the
+// hand-written list this replaced had silently gone stale, missing a code that
+// had been added alongside it. A constant that exists but is undocumented is
+// a failure mode the caller cannot handle, so the check has to be exhaustive
+// by construction.
+func errorCodeValues(t *testing.T) map[string]string {
+	t.Helper()
+	src, err := os.ReadFile("errors.go")
+	if err != nil {
+		t.Fatalf("reading errors.go: %v", err)
+	}
+
+	re := regexp.MustCompile(`(?m)^\s*(Code[A-Za-z]+)\s*=\s*"([^"]+)"`)
+	matches := re.FindAllStringSubmatch(string(src), -1)
+	if len(matches) == 0 {
+		t.Fatal("found no Code* constants in errors.go; the extraction regex is broken")
+	}
+
+	codes := make(map[string]string, len(matches))
+	for _, m := range matches {
+		codes[m[1]] = m[2]
+	}
+	return codes
+}
+
+func TestGuideDocumentsEveryErrorCode(t *testing.T) {
+	codes := errorCodeValues(t)
+	// Sanity-check the extraction against a constant that certainly exists, so
+	// a regex that silently stops matching cannot make this test vacuous.
+	if codes["CodeAuth"] != CodeAuth {
+		t.Fatalf("extraction is wrong: CodeAuth = %q, want %q", codes["CodeAuth"], CodeAuth)
+	}
+
 	res := run(t, nil, "guide")
 	// The guide is the contract an agent reads; a code missing from it is a
 	// code the caller cannot handle.
-	for _, code := range []string{CodeUsage, CodeAuth, CodeNotFound, CodeRateLimit, CodeAPI, CodeAmbiguous, CodeCredentials} {
-		if !strings.Contains(res.Stdout, code) {
-			t.Errorf("guide does not document the error code %q", code)
+	for name, value := range codes {
+		if !strings.Contains(res.Stdout, value) {
+			t.Errorf("guide does not document error code %s (%q)", name, value)
+		}
+	}
+}
+
+// The README carries the same list for humans and drifts just as easily.
+func TestReadmeDocumentsEveryErrorCode(t *testing.T) {
+	readme, err := os.ReadFile("../../README.md")
+	if err != nil {
+		t.Skipf("README not readable from this working directory: %v", err)
+	}
+	for name, value := range errorCodeValues(t) {
+		if !strings.Contains(string(readme), value) {
+			t.Errorf("README does not document error code %s (%q)", name, value)
 		}
 	}
 }

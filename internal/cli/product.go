@@ -9,6 +9,26 @@ import (
 	"github.com/jacobcase/dk/internal/output"
 )
 
+// SubstitutesResult is the JSON shape of `dk product --substitutes`.
+type SubstitutesResult struct {
+	PartNumber  string           `json:"part_number"`
+	Substitutes []SubstituteView `json:"substitutes"`
+	Count       int              `json:"count"`
+}
+
+// RecommendedResult is the JSON shape of `dk product --recommended`.
+type RecommendedResult struct {
+	PartNumber  string            `json:"part_number"`
+	Recommended []RecommendedView `json:"recommended"`
+}
+
+// AlternatePackagingResult is the JSON shape of
+// `dk product --alternate-packaging`.
+type AlternatePackagingResult struct {
+	PartNumber string        `json:"part_number"`
+	Packaging  []SummaryView `json:"packaging"`
+}
+
 func newProductCommand(app *App) *cobra.Command {
 	var (
 		raw          bool
@@ -45,8 +65,11 @@ so you can pick the right one for "dk list add".`,
 			// cobra validates flag groups after the pre-run hook, which would
 			// leave the failure classified as a runtime error instead of a
 			// usage error.
-			if err := exactlyOneOf(cmd, "variations", "parameters", "substitutes",
+			if err := atMostOneOf(cmd, "variations", "parameters", "substitutes",
 				"recommended", "alternate-packaging"); err != nil {
+				return err
+			}
+			if err := app.checkRawFormat(raw); err != nil {
 				return err
 			}
 
@@ -56,15 +79,52 @@ so you can pick the right one for "dk list add".`,
 				return err
 			}
 
+			// --raw fetches through the raw path rather than re-encoding a decoded
+			// struct, so the caller gets exactly what DigiKey sent.
+			if raw {
+				endpoint := digikey.RawProductDetails
+				switch {
+				case recommended:
+					endpoint = digikey.RawProductRecommended
+				case altPackaging:
+					endpoint = digikey.RawProductAltPackaging
+				case substitutes:
+					endpoint = digikey.RawProductSubstitutes
+				}
+				payload, err := client.RawProductResponse(ctx, partNumber, endpoint)
+				if err != nil {
+					return err
+				}
+				return app.printRaw(payload)
+			}
+
+			// These three query their own endpoints and return their own shapes.
+			// Each is flattened into a dk view for the same reason ProductView
+			// exists — one command's JSON should look like the next's — and each
+			// initializes its slice so an empty result is [] rather than null.
 			if recommended {
 				recs, err := client.RecommendedProducts(ctx, partNumber)
 				if err != nil {
 					return err
 				}
-				if raw {
-					return app.Printer.Print(recs, nil)
+				result := RecommendedResult{PartNumber: partNumber, Recommended: []RecommendedView{}}
+				// DigiKey groups recommendations by requested product number;
+				// with one part number in, there is only ever one group, so the
+				// nesting is flattened away here.
+				for _, r := range recs {
+					for _, p := range r.RecommendedProducts {
+						result.Recommended = append(result.Recommended, RecommendedView{
+							DigiKeyPartNumber:      p.DigiKeyProductNumber,
+							ManufacturerPartNumber: p.ManufacturerProductNumber,
+							Manufacturer:           p.ManufacturerName,
+							Description:            p.ProductDescription,
+							UnitPrice:              p.UnitPrice,
+							QuantityAvailable:      p.QuantityAvailable,
+							ProductURL:             p.ProductURL,
+						})
+					}
 				}
-				return app.Printer.Print(recs, recommendedTable(recs))
+				return app.Printer.Print(result, recommendedTable(result.Recommended))
 			}
 
 			if altPackaging {
@@ -72,10 +132,11 @@ so you can pick the right one for "dk list add".`,
 				if err != nil {
 					return err
 				}
-				if raw {
-					return app.Printer.Print(packs, nil)
+				result := AlternatePackagingResult{
+					PartNumber: partNumber,
+					Packaging:  summaryViews(packs),
 				}
-				return app.Printer.Print(packs, summaryTable(packs, "PACKAGING OPTION"))
+				return app.Printer.Print(result, summaryTable(result.Packaging, "PACKAGING OPTION"))
 			}
 
 			if substitutes {
@@ -83,18 +144,33 @@ so you can pick the right one for "dk list add".`,
 				if err != nil {
 					return err
 				}
-				if raw {
-					return app.Printer.Print(resp, nil)
+				result := SubstitutesResult{
+					PartNumber:  partNumber,
+					Substitutes: []SubstituteView{},
 				}
-				return app.Printer.Print(resp, substitutesTable(resp.ProductSubstitutes))
+				for _, s := range resp.ProductSubstitutes {
+					result.Substitutes = append(result.Substitutes, SubstituteView{
+						SubstituteType: s.SubstituteType,
+						SummaryView: SummaryView{
+							DigiKeyPartNumber:      s.DigiKeyProductNumber,
+							ManufacturerPartNumber: s.ManufacturerProductNumber,
+							Manufacturer:           s.Manufacturer.Name,
+							Description:            s.Description,
+							UnitPrice:              s.UnitPrice,
+							QuantityAvailable:      s.QuantityAvailable,
+							ProductURL:             s.ProductURL,
+						},
+					})
+				}
+				// DigiKey's own count is echoed rather than derived, so a
+				// mismatch with the array length stays visible.
+				result.Count = resp.ProductSubstitutesCount
+				return app.Printer.Print(result, substitutesTable(result.Substitutes))
 			}
 
 			details, err := client.ProductDetails(ctx, partNumber)
 			if err != nil {
 				return err
-			}
-			if raw {
-				return app.Printer.Print(details, nil)
 			}
 
 			currency := details.SearchLocaleUsed.Currency
@@ -111,18 +187,10 @@ so you can pick the right one for "dk list add".`,
 			case parameters:
 				return app.Printer.Print(view, parametersTable(view.Parameters))
 			default:
-				pairs := detailPairs(view)
-				table := output.KeyValueTable(pairs)
-				if err := app.Printer.Print(view, table); err != nil {
+				// One Print per command: price breaks are rows in this table,
+				// not a table of their own. See detailPairs.
+				if err := app.Printer.Print(view, output.KeyValueTable(detailPairs(view))); err != nil {
 					return err
-				}
-				if len(view.PriceBreaks) > 0 {
-					app.Printer.PrintText("\nPrice breaks (%s):", currency)
-					if app.Printer.Format != output.FormatJSON {
-						if err := app.Printer.Print(view.PriceBreaks, priceBreakTable(view.PriceBreaks)); err != nil {
-							return err
-						}
-					}
 				}
 				if len(view.Variations) > 1 {
 					app.Printer.PrintText("\n%d packaging variations; run with --variations to list them.", len(view.Variations))
@@ -143,9 +211,9 @@ so you can pick the right one for "dk list add".`,
 	return cmd
 }
 
-// exactlyOneOf returns a usage error if more than one of the named boolean
+// atMostOneOf returns a usage error if more than one of the named boolean
 // flags was set. Zero is allowed; the caller falls back to its default view.
-func exactlyOneOf(cmd *cobra.Command, names ...string) error {
+func atMostOneOf(cmd *cobra.Command, names ...string) error {
 	var set []string
 	for _, name := range names {
 		if cmd.Flags().Changed(name) {
@@ -159,38 +227,36 @@ func exactlyOneOf(cmd *cobra.Command, names ...string) error {
 }
 
 // recommendedTable renders "customers also bought" suggestions.
-func recommendedTable(recs []digikey.Recommendation) *output.Table {
+func recommendedTable(recs []RecommendedView) *output.Table {
 	t := &output.Table{
 		Headers: []string{"DKPN", "MPN", "MFR", "DESCRIPTION", "STOCK", "UNIT"},
 		Empty:   "DigiKey has no recommendations for this product.",
 	}
-	for _, r := range recs {
-		for _, p := range r.RecommendedProducts {
-			t.AddRow(
-				p.DigiKeyProductNumber,
-				p.ManufacturerProductNumber,
-				output.Truncate(p.ManufacturerName, 20),
-				output.Truncate(p.ProductDescription, 40),
-				p.QuantityAvailable,
-				output.Money(p.UnitPrice),
-			)
-		}
+	for _, p := range recs {
+		t.AddRow(
+			p.DigiKeyPartNumber,
+			p.ManufacturerPartNumber,
+			output.Truncate(p.Manufacturer, 20),
+			output.Truncate(p.Description, 40),
+			p.QuantityAvailable,
+			output.Money(p.UnitPrice),
+		)
 	}
 	return t
 }
 
-// summaryTable renders the compact ProductSummary shape shared by the
+// summaryTable renders the flattened summary shape shared by the
 // alternate-packaging and association responses.
-func summaryTable(items []digikey.ProductSummary, empty string) *output.Table {
+func summaryTable(items []SummaryView, empty string) *output.Table {
 	t := &output.Table{
 		Headers: []string{"DKPN", "MPN", "MFR", "DESCRIPTION", "STOCK", "UNIT"},
 		Empty:   "No " + strings.ToLower(empty) + "s returned.",
 	}
 	for _, p := range items {
 		t.AddRow(
-			p.DigiKeyProductNumber,
-			p.ManufacturerProductNumber,
-			output.Truncate(p.Manufacturer.Name, 20),
+			p.DigiKeyPartNumber,
+			p.ManufacturerPartNumber,
+			output.Truncate(p.Manufacturer, 20),
 			output.Truncate(p.Description, 40),
 			p.QuantityAvailable,
 			p.UnitPrice,
@@ -218,24 +284,16 @@ func parametersTable(params []ParameterView) *output.Table {
 	return t
 }
 
-func priceBreakTable(breaks []PriceBreakView) *output.Table {
-	t := &output.Table{Headers: []string{"QTY", "UNIT", "EXTENDED"}, Empty: "No price breaks returned."}
-	for _, b := range breaks {
-		t.AddRow(b.Quantity, output.Money(b.UnitPrice), output.Money(b.TotalPrice))
-	}
-	return t
-}
-
-func substitutesTable(subs []digikey.ProductSubstitute) *output.Table {
+func substitutesTable(subs []SubstituteView) *output.Table {
 	t := &output.Table{
 		Headers: []string{"DKPN", "MPN", "MFR", "DESCRIPTION", "STOCK", "UNIT", "TYPE"},
 		Empty:   "No substitutes listed.",
 	}
 	for _, s := range subs {
 		t.AddRow(
-			s.DigiKeyProductNumber,
-			s.ManufacturerProductNumber,
-			output.Truncate(s.Manufacturer.Name, 22),
+			s.DigiKeyPartNumber,
+			s.ManufacturerPartNumber,
+			output.Truncate(s.Manufacturer, 22),
 			output.Truncate(s.Description, 40),
 			s.QuantityAvailable,
 			s.UnitPrice,
