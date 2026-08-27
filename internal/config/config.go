@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/jacobcase/dk/internal/atomicfile"
@@ -103,15 +104,41 @@ func (c Config) Validate() error {
 
 // Dir returns the directory holding config.json and token.json. DK_CONFIG_DIR
 // overrides it, which is what the tests (and throwaway sandboxes) use.
+//
+// On Unix this is $XDG_CONFIG_HOME/dk, or ~/.config/dk. Deliberately not
+// os.UserConfigDir(): that maps to ~/Library/Application Support on macOS,
+// which is Apple's convention for GUI applications — command-line tools live in
+// ~/.config there, which is where gh, git, and htop all put themselves. The
+// stdlib path also contains a space, and dk prints its config location from
+// `dk config path` and `dk auth status`, so a caller pasting that into a shell
+// would need to know to quote it.
+//
+// Windows keeps %AppData%, where os.UserConfigDir is already right.
 func Dir() (string, error) {
 	if dir := os.Getenv("DK_CONFIG_DIR"); dir != "" {
 		return dir, nil
 	}
-	base, err := os.UserConfigDir()
-	if err != nil {
-		return "", fmt.Errorf("locate user config dir: %w", err)
+
+	if runtime.GOOS == "windows" {
+		base, err := os.UserConfigDir()
+		if err != nil {
+			return "", fmt.Errorf("locate user config dir: %w", err)
+		}
+		return filepath.Join(base, "dk"), nil
 	}
-	return filepath.Join(base, "dk"), nil
+
+	// The XDG spec says a relative XDG_CONFIG_HOME is invalid and must be
+	// ignored rather than resolved against the working directory — otherwise
+	// the config location would depend on where dk was run from.
+	if dir := os.Getenv("XDG_CONFIG_HOME"); filepath.IsAbs(dir) {
+		return filepath.Join(dir, "dk"), nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("locate home directory: %w", err)
+	}
+	return filepath.Join(home, ".config", "dk"), nil
 }
 
 // Path returns the full path to config.json.

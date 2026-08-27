@@ -391,6 +391,10 @@ Resolution order, highest first:
 | `locale.language` | `DIGIKEY_LOCALE_LANGUAGE` | `en` |
 | `locale.currency` | `DIGIKEY_LOCALE_CURRENCY` | `USD` |
 
+Config and the token cache live in `$XDG_CONFIG_HOME/dk`, defaulting to
+`~/.config/dk` — including on macOS, alongside the other command-line tools,
+rather than in `~/Library/Application Support`. Windows uses `%AppData%\dk`.
+
 `DK_CONFIG_DIR` relocates the config and token directory. `DIGIKEY_API_BASE_URL`
 points dk at a different host, which is how the test suite runs against a mock.
 

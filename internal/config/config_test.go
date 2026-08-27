@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -295,5 +296,94 @@ func TestMaskShortSecrets(t *testing.T) {
 		if got := mask(tt.in); got != tt.want {
 			t.Errorf("mask(%q) = %q, want %q", tt.in, got, tt.want)
 		}
+	}
+}
+
+// Dir must land alongside the other command-line tools in ~/.config, not in
+// macOS's ~/Library/Application Support, which is where os.UserConfigDir would
+// put it and where GUI applications live.
+func TestDirUsesXDGConfigHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows keeps %AppData%, where os.UserConfigDir is already correct")
+	}
+
+	tests := []struct {
+		name    string
+		dkDir   string
+		xdg     string
+		home    string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:  "DK_CONFIG_DIR wins over everything",
+			dkDir: "/tmp/explicit",
+			xdg:   "/tmp/xdg",
+			home:  "/tmp/home",
+			want:  "/tmp/explicit",
+		},
+		{
+			name: "absolute XDG_CONFIG_HOME is honored",
+			xdg:  "/tmp/xdg",
+			home: "/tmp/home",
+			want: "/tmp/xdg/dk",
+		},
+		{
+			name: "no XDG falls back to ~/.config",
+			home: "/tmp/home",
+			want: "/tmp/home/.config/dk",
+		},
+		{
+			// The spec says a relative XDG_CONFIG_HOME is invalid. Resolving it
+			// would make the config location depend on the working directory.
+			name: "relative XDG_CONFIG_HOME is ignored",
+			xdg:  "relative/path",
+			home: "/tmp/home",
+			want: "/tmp/home/.config/dk",
+		},
+		{
+			name: "empty XDG_CONFIG_HOME is ignored",
+			xdg:  "",
+			home: "/tmp/home",
+			want: "/tmp/home/.config/dk",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("DK_CONFIG_DIR", tt.dkDir)
+			t.Setenv("XDG_CONFIG_HOME", tt.xdg)
+			t.Setenv("HOME", tt.home)
+
+			got, err := Dir()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Dir() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("Dir() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// The path dk prints must be pasteable into a shell without quoting. The old
+// location, ~/Library/Application Support/dk, was not.
+func TestDirHasNoSpaces(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows paths routinely contain spaces")
+	}
+	t.Setenv("DK_CONFIG_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("HOME", "/Users/example")
+
+	got, err := Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsAny(got, " \t") {
+		t.Errorf("Dir() = %q contains whitespace; `dk config path` output would need quoting", got)
+	}
+	if !strings.HasSuffix(got, "/.config/dk") {
+		t.Errorf("Dir() = %q, want it under ~/.config/dk", got)
 	}
 }

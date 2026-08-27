@@ -21,7 +21,8 @@ cmd/dk/            main; just calls cli.Main()
 internal/cli/      cobra command tree, output views, error classification
 internal/digikey/  typed client for Product Information v4 and MyLists v1
 internal/auth/     both OAuth flows, token cache, HTTPS callback listener
-internal/config/   config file + env resolution
+internal/config/   config file + env resolution (~/.config/dk, XDG not
+                   os.UserConfigDir — see Dir())
 internal/output/   json / table / csv rendering
 internal/atomicfile/  crash-safe file replacement, shared by config and auth
 ```
