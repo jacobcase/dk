@@ -78,7 +78,7 @@ func newSummaryView(p digikey.ProductSummary) SummaryView {
 		Description:            p.Description,
 		UnitPrice:              p.UnitPrice,
 		QuantityAvailable:      p.QuantityAvailable,
-		ProductURL:             p.ProductURL,
+		ProductURL:             normalizeAssetURL(p.ProductURL),
 	}
 }
 
@@ -157,8 +157,8 @@ func newProductView(p digikey.Product, currency string) ProductView {
 		NCNR:                   p.Ncnr,
 		LeadWeeks:              p.ManufacturerLeadWeeks,
 		RohsStatus:             p.Classifications.RohsStatus,
-		DatasheetURL:           p.DatasheetURL,
-		ProductURL:             p.ProductURL,
+		DatasheetURL:           normalizeAssetURL(p.DatasheetURL),
+		ProductURL:             normalizeAssetURL(p.ProductURL),
 	}
 
 	if pv, ok := p.PrimaryVariation(); ok {

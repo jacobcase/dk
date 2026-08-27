@@ -85,7 +85,7 @@ func newListPartView(p digikey.ListPart) ListPartView {
 		CustomerReference:      p.CustomerReference,
 		Notes:                  p.Notes,
 		Status:                 p.PartStatus,
-		DatasheetURL:           p.PrimaryDatasheetURL,
+		DatasheetURL:           normalizeAssetURL(p.PrimaryDatasheetURL),
 		Matched:                p.Flags.IsMatched || p.DigiKeyPartNumber != "",
 	}
 }

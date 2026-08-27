@@ -93,7 +93,7 @@ where it landed. Existing files are left alone unless --overwrite is passed.`,
 			// first and both are reported as written.
 			taken := map[string]int{}
 			for _, link := range links {
-				u := normalizeMediaURL(link.URL)
+				u := normalizeAssetURL(link.URL)
 				if u == "" {
 					continue
 				}
@@ -190,9 +190,18 @@ func docsTable(docs []DocumentView, downloading bool) *output.Table {
 	return t
 }
 
-// normalizeMediaURL repairs the protocol-relative URLs DigiKey returns for some
+// normalizeAssetURL repairs the protocol-relative URLs DigiKey returns for some
 // assets ("//mm.digikey.com/...") and rejects anything not fetchable over HTTP.
-func normalizeMediaURL(raw string) string {
+//
+// This is not a docs-only concern: roughly 40% of datasheet_url values in a
+// sampled search response came back protocol-relative, which no HTTP client
+// will fetch as-is. Every URL dk hands a caller goes through here, so what the
+// output promises is always something that can actually be retrieved.
+//
+// A URL that cannot be repaired yields "" and the field is omitted. An absent
+// datasheet is a state callers already handle; a present-but-unfetchable one
+// just fails later, further from the cause.
+func normalizeAssetURL(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""

@@ -90,6 +90,13 @@ API cannot express it.
 search result, so `dk docs` (the `/media` endpoint) is only for the rest:
 additional datasheets, manuals, reference designs, CAD models, PCNs.
 
+Every URL dk emits — `datasheet_url`, `product_url`, and each document `url` —
+goes through `normalizeAssetURL`. DigiKey returns protocol-relative URLs
+(`//mm.digikey.com/...`) for a large share of datasheets: 8 of 20 in a sampled
+search. No HTTP client fetches those, so they are repaired to `https:` and
+anything still unfetchable is dropped rather than handed on as a string that
+looks like a URL.
+
 `--download` treats every filename as hostile — it comes from a remote URL.
 `sanitizeFilename` reduces it to a single path element with no separators and no
 leading dots; `TestDocumentFilenameIsContained` is the guard. Downloads are

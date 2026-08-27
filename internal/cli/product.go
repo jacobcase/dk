@@ -120,7 +120,7 @@ so you can pick the right one for "dk list add".`,
 							Description:            p.ProductDescription,
 							UnitPrice:              p.UnitPrice,
 							QuantityAvailable:      p.QuantityAvailable,
-							ProductURL:             p.ProductURL,
+							ProductURL:             normalizeAssetURL(p.ProductURL),
 						})
 					}
 				}
@@ -158,7 +158,7 @@ so you can pick the right one for "dk list add".`,
 							Description:            s.Description,
 							UnitPrice:              s.UnitPrice,
 							QuantityAvailable:      s.QuantityAvailable,
-							ProductURL:             s.ProductURL,
+							ProductURL:             normalizeAssetURL(s.ProductURL),
 						},
 					})
 				}

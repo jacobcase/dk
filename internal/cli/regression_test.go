@@ -965,3 +965,99 @@ func TestRelatedAndAlternatePackagingShareTheSameShape(t *testing.T) {
 		}
 	}
 }
+
+// --- asset URL normalization -----------------------------------------------
+
+// DigiKey returns protocol-relative datasheet URLs for a large fraction of
+// products — 8 of 20 in a sampled search. Neither curl nor Go's http client
+// will fetch "//host/path", so emitting it verbatim hands the caller a string
+// that looks like a URL and cannot be used.
+func TestDatasheetURLsAreFetchable(t *testing.T) {
+	const body = `{
+	  "ProductsCount": 1,
+	  "SearchLocaleUsed": {"Currency":"USD"},
+	  "Products": [{
+	    "ManufacturerProductNumber":"GRM188R71C104KA01D",
+	    "Manufacturer":{"Id":2359,"Name":"Murata"},
+	    "Description":{"ProductDescription":"CAP CER"},
+	    "DatasheetUrl":"//mm.digikey.com/Volume0/opasdata/d220001/medias/docus/8942/x.pdf",
+	    "ProductUrl":"//www.digikey.com/en/products/detail/x/1",
+	    "ProductVariations":[{"DigiKeyProductNumber":"490-1532-1-ND"}]
+	  }]
+	}`
+
+	m := newMockDigiKey(t)
+	m.handle("POST", "/products/v4/search/keyword", http.StatusOK, body)
+
+	res := run(t, m, "search", "capacitor")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+
+	var got SearchResult
+	res.JSON(t, &got)
+	p := got.Products[0]
+
+	if !strings.HasPrefix(p.DatasheetURL, "https://") {
+		t.Errorf("datasheet_url = %q, want an absolute https URL", p.DatasheetURL)
+	}
+	if !strings.Contains(p.DatasheetURL, "mm.digikey.com") {
+		t.Errorf("datasheet_url = %q, want the host preserved", p.DatasheetURL)
+	}
+	if !strings.HasPrefix(p.ProductURL, "https://") {
+		t.Errorf("product_url = %q, want an absolute https URL", p.ProductURL)
+	}
+}
+
+// The same repair has to apply to a list line's datasheet, which comes from a
+// different field on a different endpoint.
+func TestListDatasheetURLsAreFetchable(t *testing.T) {
+	m := newMockDigiKey(t)
+	m.handle("GET", "/mylists/v1/lists", http.StatusOK, listsBody)
+	m.handle("GET", "/mylists/v1/lists/aaa-111/parts", http.StatusOK, `{
+	  "TotalParts":1,
+	  "PartsList":[{"UniqueId":"u1","DigiKeyPartNumber":"490-1532-1-ND",
+	    "PrimaryDatasheetUrl":"//mm.digikey.com/docus/x.pdf",
+	    "Flags":{"IsMatched":true},
+	    "Quantities":[{"QuantityRequested":1,"SelectedPackOptionIndex":0,
+	      "PackOptions":[{"PackType":"CT","DigiKeyPartNumber":"490-1532-1-ND",
+	        "CalculatedUnitPrice":0.1,"ExtendedPrice":0.1}]}]}]}`)
+
+	res := runAuthed(t, m, "list", "show", "Bench PSU rev A")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+	var got ListDetail
+	res.JSON(t, &got)
+	if !strings.HasPrefix(got.Parts[0].DatasheetURL, "https://") {
+		t.Errorf("datasheet_url = %q, want an absolute https URL", got.Parts[0].DatasheetURL)
+	}
+}
+
+func TestNormalizeAssetURL(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"protocol-relative gains https", "//mm.digikey.com/x.pdf", "https://mm.digikey.com/x.pdf"},
+		{"https passes through", "https://example.com/x.pdf", "https://example.com/x.pdf"},
+		{"http is left alone", "http://example.com/x.pdf", "http://example.com/x.pdf"},
+		{"surrounding space is trimmed", "  //mm.digikey.com/x.pdf  ", "https://mm.digikey.com/x.pdf"},
+		{"empty stays empty", "", ""},
+		{"whitespace only", "   ", ""},
+		// Anything a caller cannot fetch is dropped rather than passed on.
+		{"ftp is dropped", "ftp://example.com/x.pdf", ""},
+		{"file is dropped", "file:///etc/passwd", ""},
+		{"javascript is dropped", "javascript:alert(1)", ""},
+		{"bare path is dropped", "media/x.pdf", ""},
+		{"query and fragment survive", "//h/x.pdf?a=1#p2", "https://h/x.pdf?a=1#p2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeAssetURL(tt.in); got != tt.want {
+				t.Errorf("normalizeAssetURL(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}

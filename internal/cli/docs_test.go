@@ -275,7 +275,7 @@ func TestDocsDownloadWithNoMatchesExits4(t *testing.T) {
 	}
 }
 
-func TestNormalizeMediaURL(t *testing.T) {
+func TestNormalizeAssetURLMediaCases(t *testing.T) {
 	tests := []struct {
 		name string
 		in   string
@@ -293,8 +293,8 @@ func TestNormalizeMediaURL(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := normalizeMediaURL(tt.in); got != tt.want {
-				t.Errorf("normalizeMediaURL(%q) = %q, want %q", tt.in, got, tt.want)
+			if got := normalizeAssetURL(tt.in); got != tt.want {
+				t.Errorf("normalizeAssetURL(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}
