@@ -425,7 +425,7 @@ func describeCandidates(candidates []digikey.NamedID) string {
 }
 
 // namedIDTable renders manufacturers or flat categories.
-func namedIDTable(items []digikey.NamedID, header string) *output.Table {
+func namedIDTable(items []NamedIDView, header string) *output.Table {
 	t := &output.Table{Headers: []string{"ID", header}, Empty: "No results."}
 	for _, item := range items {
 		t.AddRow(item.ID, item.Name)

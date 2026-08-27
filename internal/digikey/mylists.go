@@ -93,6 +93,11 @@ type RequestedPart struct {
 	Attrition           float64             `json:"Attrition,omitempty"`
 	AlternateParts      []string            `json:"AlternateParts,omitempty"`
 	Quantities          []RequestedQuantity `json:"Quantities,omitempty"`
+	// SelectedQuantityIndex names which Quantities entry the line is priced
+	// from. It has to be here because DigiKey's part update is a replace, not a
+	// patch: `dk list set` reads a RequestedPart and sends it back, so a field
+	// this struct cannot hold is a field the write silently resets to zero.
+	SelectedQuantityIndex int `json:"SelectedQuantityIndex,omitempty"`
 }
 
 // ListSummary is the metadata DigiKey returns for a list. The parts array is

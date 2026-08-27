@@ -530,8 +530,17 @@ func TestCategoriesCommand(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d top-level categories, want 1", len(got))
 	}
-	if got[0]["Name"] != "Capacitors" {
-		t.Errorf("category name = %v, want Capacitors", got[0]["Name"])
+	if got[0]["name"] != "Capacitors" {
+		t.Errorf("category name = %v, want Capacitors", got[0]["name"])
+	}
+	// /search/categories returns DigiKey's Category, which has five fields. dk
+	// decodes it into CategoryNode -- really the richer in-Product shape -- so
+	// printing that struct emitted NewProductCount and SeoDescription, which
+	// DigiKey never sent. The view exists to keep them out.
+	for _, phantom := range []string{"NewProductCount", "SeoDescription", "Id", "Name"} {
+		if _, ok := got[0][phantom]; ok {
+			t.Errorf("category JSON has key %q; the view must not leak DigiKey's struct", phantom)
+		}
 	}
 }
 
@@ -547,8 +556,8 @@ func TestCategoriesFlatIncludesChildren(t *testing.T) {
 	}
 
 	var got []struct {
-		ID   int    `json:"Id"`
-		Name string `json:"Name"`
+		ID   int    `json:"id"`
+		Name string `json:"name"`
 	}
 	res.JSON(t, &got)
 	if len(got) != 2 {
@@ -606,7 +615,7 @@ func TestManufacturersFilterIsCaseInsensitive(t *testing.T) {
 		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
 	}
 	var got []struct {
-		Name string `json:"Name"`
+		Name string `json:"name"`
 	}
 	res.JSON(t, &got)
 	if len(got) != 1 || !strings.Contains(got[0].Name, "Murata") {
@@ -1059,5 +1068,47 @@ func TestNormalizeAssetURL(t *testing.T) {
 				t.Errorf("normalizeAssetURL(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRecommendedSendsALimit(t *testing.T) {
+	// DigiKey defaults recommendedproducts to a single result, and the response
+	// carries no total, so a missing limit looks exactly like a part with one
+	// recommendation. The flag must reach the wire.
+	m := newMockDigiKey(t)
+	m.handle("GET", "/products/v4/search/X/recommendedproducts", http.StatusOK,
+		`{"Recommendations":[{"RecommendedProducts":[{"DigiKeyProductNumber":"A"},{"DigiKeyProductNumber":"B"}]}]}`)
+
+	res := run(t, m, "product", "X", "--recommended", "--recommended-limit", "25")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+	var query string
+	for _, r := range m.requests {
+		if strings.Contains(r.Path, "recommendedproducts") {
+			query = r.Query
+		}
+	}
+	if !strings.Contains(query, "limit=25") {
+		t.Errorf("query = %q, want limit=25", query)
+	}
+}
+
+func TestRecommendedDefaultLimitIsNotOne(t *testing.T) {
+	// The default has to beat DigiKey's, or the flag is the only way to avoid
+	// a silently truncated answer.
+	m := newMockDigiKey(t)
+	m.handle("GET", "/products/v4/search/X/recommendedproducts", http.StatusOK,
+		`{"Recommendations":[]}`)
+
+	if res := run(t, m, "product", "X", "--recommended"); res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+	for _, r := range m.requests {
+		if strings.Contains(r.Path, "recommendedproducts") {
+			if strings.Contains(r.Query, "limit=1&") || strings.HasSuffix(r.Query, "limit=1") || r.Query == "" {
+				t.Errorf("query = %q, want a limit above DigiKey's default of 1", r.Query)
+			}
+		}
 	}
 }

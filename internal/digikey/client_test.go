@@ -696,7 +696,7 @@ func TestRecommendedProductsDecodes(t *testing.T) {
 		`{"Recommendations":[{"ProductNumber":"X","RecommendedProducts":[
 		  {"DigiKeyProductNumber":"REC-ND","UnitPrice":1.25,"QuantityAvailable":5}]}]}`)
 
-	recs, err := client.RecommendedProducts(context.Background(), "X")
+	recs, err := client.RecommendedProducts(context.Background(), "X", 0)
 	if err != nil {
 		t.Fatalf("RecommendedProducts() error = %v", err)
 	}

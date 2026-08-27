@@ -441,7 +441,7 @@ const (
 //
 // endpoint is restricted to the Raw* constants above so a caller cannot use
 // this to assemble an arbitrary request path.
-func (c *Client) RawProductResponse(ctx context.Context, partNumber, endpoint string) (json.RawMessage, error) {
+func (c *Client) RawProductResponse(ctx context.Context, partNumber, endpoint string, limit int) (json.RawMessage, error) {
 	if strings.TrimSpace(partNumber) == "" {
 		return nil, errors.New("product number is required")
 	}
@@ -451,10 +451,19 @@ func (c *Client) RawProductResponse(ctx context.Context, partNumber, endpoint st
 		return nil, fmt.Errorf("digikey: unsupported raw product endpoint %q", endpoint)
 	}
 
+	// The recommendations endpoint defaults to one result; --raw has to carry
+	// the same limit as the typed path or the two disagree about what the call
+	// returns.
+	var query url.Values
+	if endpoint == RawProductRecommended {
+		query = recommendedQuery(limit)
+	}
+
 	var out json.RawMessage
 	err := c.do(ctx, request{
 		method:     "GET",
 		path:       productsBasePath + "/search/" + url.PathEscape(partNumber) + "/" + endpoint,
+		query:      query,
 		out:        &out,
 		cacheScope: ScopeProduct,
 	})
@@ -599,8 +608,21 @@ type RecommendedProductsResponse struct {
 	Recommendations []Recommendation `json:"Recommendations"`
 }
 
+// recommendedQuery builds the recommendedproducts query. A limit of 0 sends
+// nothing, leaving DigiKey's own default in force.
+func recommendedQuery(limit int) url.Values {
+	if limit <= 0 {
+		return nil
+	}
+	return url.Values{"limit": []string{strconv.Itoa(limit)}}
+}
+
 // RecommendedProducts returns products commonly bought with this one.
-func (c *Client) RecommendedProducts(ctx context.Context, partNumber string) ([]Recommendation, error) {
+//
+// limit caps how many come back. It matters more than it looks: DigiKey's
+// default is 1, so omitting it returns a single recommendation and nothing in
+// the response says the rest were withheld. Pass 0 only to accept that default.
+func (c *Client) RecommendedProducts(ctx context.Context, partNumber string, limit int) ([]Recommendation, error) {
 	if strings.TrimSpace(partNumber) == "" {
 		return nil, errors.New("product number is required")
 	}
@@ -608,6 +630,7 @@ func (c *Client) RecommendedProducts(ctx context.Context, partNumber string) ([]
 	err := c.do(ctx, request{
 		method:     "GET",
 		path:       productsBasePath + "/search/" + url.PathEscape(partNumber) + "/recommendedproducts",
+		query:      recommendedQuery(limit),
 		out:        &out,
 		cacheScope: ScopeProduct,
 	})

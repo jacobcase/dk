@@ -37,6 +37,7 @@ func newProductCommand(app *App) *cobra.Command {
 		substitutes  bool
 		recommended  bool
 		altPackaging bool
+		recLimit     int
 	)
 
 	cmd := &cobra.Command{
@@ -91,7 +92,7 @@ so you can pick the right one for "dk list add".`,
 				case substitutes:
 					endpoint = digikey.RawProductSubstitutes
 				}
-				payload, err := client.RawProductResponse(ctx, partNumber, endpoint)
+				payload, err := client.RawProductResponse(ctx, partNumber, endpoint, recLimit)
 				if err != nil {
 					return err
 				}
@@ -103,7 +104,7 @@ so you can pick the right one for "dk list add".`,
 			// exists — one command's JSON should look like the next's — and each
 			// initializes its slice so an empty result is [] rather than null.
 			if recommended {
-				recs, err := client.RecommendedProducts(ctx, partNumber)
+				recs, err := client.RecommendedProducts(ctx, partNumber, recLimit)
 				if err != nil {
 					return err
 				}
@@ -205,6 +206,9 @@ so you can pick the right one for "dk list add".`,
 	f.BoolVar(&parameters, "parameters", false, "show parametric attributes")
 	f.BoolVar(&substitutes, "substitutes", false, "show substitute parts instead of details")
 	f.BoolVar(&recommended, "recommended", false, "show products commonly bought with this one")
+	// DigiKey defaults this endpoint to a single result, so a default of 1 here
+	// would silently look like "there is only one recommendation".
+	f.IntVar(&recLimit, "recommended-limit", 10, "how many recommendations to request (DigiKey defaults to 1)")
 	f.BoolVar(&altPackaging, "alternate-packaging", false, "show the same part in other packaging")
 	f.BoolVar(&raw, "raw", false, "emit DigiKey's unmodified response (implies --output json)")
 
@@ -343,10 +347,11 @@ which accepts either an id or a name.
 			}
 
 			if flat {
-				items := flattenCategories(nodes, nil)
+				items := newNamedIDViews(flattenCategories(nodes, nil))
 				return app.Printer.Print(items, namedIDTable(items, "CATEGORY"))
 			}
-			return app.Printer.Print(nodes, categoryTable(nodes))
+			views := newCategoryViews(nodes)
+			return app.Printer.Print(views, categoryTable(views))
 		},
 	}
 	cmd.Flags().BoolVar(&flat, "flat", false, "flatten the tree into a single id/name list")
@@ -354,13 +359,13 @@ which accepts either an id or a name.
 }
 
 // categoryTable renders the taxonomy with indentation to convey depth.
-func categoryTable(nodes []digikey.CategoryNode) *output.Table {
+func categoryTable(nodes []CategoryView) *output.Table {
 	t := &output.Table{Headers: []string{"ID", "CATEGORY", "PRODUCTS"}, Empty: "No categories returned."}
-	var walk func(ns []digikey.CategoryNode, depth int)
-	walk = func(ns []digikey.CategoryNode, depth int) {
+	var walk func(ns []CategoryView, depth int)
+	walk = func(ns []CategoryView, depth int) {
 		for _, n := range ns {
-			t.AddRow(n.CategoryID, strings.Repeat("  ", depth)+n.Name, n.ProductCount)
-			walk(n.Children(), depth+1)
+			t.AddRow(n.ID, strings.Repeat("  ", depth)+n.Name, n.ProductCount)
+			walk(n.Children, depth+1)
 		}
 	}
 	walk(nodes, 0)
@@ -398,7 +403,8 @@ also accepts names directly.
 				}
 				items = matched
 			}
-			return app.Printer.Print(items, namedIDTable(items, "MANUFACTURER"))
+			views := newNamedIDViews(items)
+			return app.Printer.Print(views, namedIDTable(views, "MANUFACTURER"))
 		},
 	}
 	cmd.Flags().StringVar(&filter, "filter", "", "case-insensitive substring filter on the manufacturer name")

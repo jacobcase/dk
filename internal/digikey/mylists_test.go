@@ -634,3 +634,54 @@ func TestAllListsSurvivesAServerThatCapsThePage(t *testing.T) {
 		t.Errorf("made %d requests, want at least 3 to walk %d lists at %d per page", requests, total, serverCap)
 	}
 }
+
+func TestRequestedPartRoundTripsEverySpecField(t *testing.T) {
+	// DigiKey's part update is a replace, not a patch: `dk list set` reads a
+	// RequestedPart and sends it back, so any field the struct cannot hold is
+	// silently reset to its zero value by an unrelated edit. This asserts the
+	// struct is complete against the MyLists spec's RequestedPart.
+	const stored = `{
+	  "UniqueId": "u-1",
+	  "PartId": 42,
+	  "RequestedPartNumber": "490-1532-1-ND",
+	  "OriginalPartNumber": "GRM188R71H104KA93D",
+	  "ManufacturerName": "Murata",
+	  "CustomerReference": "C12",
+	  "ReferenceDesignator": "C1,C2",
+	  "Notes": "decoupling",
+	  "Attrition": 5.5,
+	  "AlternateParts": ["1276-1000-1-ND"],
+	  "SelectedQuantityIndex": 2,
+	  "Quantities": [{"Quantity": 100}]
+	}`
+
+	var part RequestedPart
+	if err := json.Unmarshal([]byte(stored), &part); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if part.SelectedQuantityIndex != 2 {
+		t.Errorf("SelectedQuantityIndex = %d, want 2", part.SelectedQuantityIndex)
+	}
+
+	out, err := json.Marshal(part)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	var before, after map[string]any
+	if err := json.Unmarshal([]byte(stored), &before); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(out, &after); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range before {
+		got, ok := after[key]
+		if !ok {
+			t.Errorf("re-encoding dropped %q: a replace would reset it to zero", key)
+			continue
+		}
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("%q = %v after round trip, want %v", key, got, want)
+		}
+	}
+}

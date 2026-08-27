@@ -76,6 +76,11 @@ AUTHENTICATION
       DIGIKEY_CLIENT_ID, DIGIKEY_CLIENT_SECRET
     or: dk config set client_id <id>; dk config set client_secret <secret>
 
+  DigiKey documents X-DIGIKEY-Account-Id as "required to receive a successful
+  response" under 2-legged OAuth. dk sends it only when account_id is set. If a
+  product command fails in a way the error does not explain, set it:
+      dk config set account_id <id>
+
   List commands additionally need a 3-legged token, because lists belong to a
   DigiKey user account. That requires a ONE-TIME interactive browser login:
       dk auth login

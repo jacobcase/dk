@@ -373,7 +373,7 @@ func TestRawProductResponsePreservesUnmodeledFields(t *testing.T) {
 	const body = `{"UndocumentedField":"keep me","Product":{}}`
 	client, cap := newTestClient(t, http.StatusOK, body)
 
-	got, err := client.RawProductResponse(context.Background(), "490-1532-1-ND", RawProductDetails)
+	got, err := client.RawProductResponse(context.Background(), "490-1532-1-ND", RawProductDetails, 0)
 	if err != nil {
 		t.Fatalf("RawProductResponse() error = %v", err)
 	}
@@ -395,7 +395,7 @@ func TestRawProductResponseRejectsUnknownEndpoint(t *testing.T) {
 	client, _ := newTestClient(t, http.StatusOK, `{}`)
 
 	for _, endpoint := range []string{"", "../../admin", "media", "productdetails/../.."} {
-		if _, err := client.RawProductResponse(context.Background(), "P", endpoint); err == nil {
+		if _, err := client.RawProductResponse(context.Background(), "P", endpoint, 0); err == nil {
 			t.Errorf("RawProductResponse(%q) error = nil, want a rejection", endpoint)
 		}
 	}
@@ -403,7 +403,7 @@ func TestRawProductResponseRejectsUnknownEndpoint(t *testing.T) {
 
 func TestRawProductResponseRequiresPartNumber(t *testing.T) {
 	client, _ := newTestClient(t, http.StatusOK, `{}`)
-	if _, err := client.RawProductResponse(context.Background(), "  ", RawProductDetails); err == nil {
+	if _, err := client.RawProductResponse(context.Background(), "  ", RawProductDetails, 0); err == nil {
 		t.Error("RawProductResponse() with a blank part number error = nil, want an error")
 	}
 }

@@ -306,3 +306,53 @@ func priceWithCurrency(price float64, currency string) string {
 	}
 	return fmt.Sprintf("%.4f %s", price, currency)
 }
+
+// NamedIDView is a flat id/name pair: a manufacturer, or a category once the
+// taxonomy has been flattened.
+//
+// It exists so these commands stop printing digikey.NamedID, whose tags are
+// DigiKey's PascalCase. Every other command answers in dk's own snake_case
+// shape, and a caller should not have to know which endpoint fed which command
+// to know what the keys look like.
+type NamedIDView struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+// CategoryView is one node of the product taxonomy.
+//
+// The endpoint returns DigiKey's Category, which carries exactly five fields.
+// dk decodes it into CategoryNode, which is really the richer in-Product shape
+// and has three more; printing that struct emitted "NewProductCount": 0 and
+// "SeoDescription": "" on every node — values DigiKey never sent. This view
+// reports only what /search/categories actually answers with.
+type CategoryView struct {
+	ID           int            `json:"id"`
+	Name         string         `json:"name"`
+	ProductCount int            `json:"product_count"`
+	Children     []CategoryView `json:"children,omitempty"`
+}
+
+// newNamedIDViews converts DigiKey's id/name pairs to dk's shape.
+func newNamedIDViews(items []digikey.NamedID) []NamedIDView {
+	views := make([]NamedIDView, 0, len(items))
+	for _, item := range items {
+		views = append(views, NamedIDView{ID: item.ID, Name: item.Name})
+	}
+	return views
+}
+
+// newCategoryViews converts the taxonomy tree, following whichever child field
+// the endpoint populated.
+func newCategoryViews(nodes []digikey.CategoryNode) []CategoryView {
+	views := make([]CategoryView, 0, len(nodes))
+	for _, n := range nodes {
+		views = append(views, CategoryView{
+			ID:           n.CategoryID,
+			Name:         n.Name,
+			ProductCount: n.ProductCount,
+			Children:     newCategoryViews(n.Children()),
+		})
+	}
+	return views
+}
