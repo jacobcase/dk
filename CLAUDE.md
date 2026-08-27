@@ -172,3 +172,18 @@ is silently ignored by the API. Two known inconsistencies are handled explicitly
 
 MyLists uses `X-DIGIKEY-Account-Id` where Product Information uses
 `X-DIGIKEY-Customer-Id`; the client sends both from one config value.
+
+`internal/digikey/testdata/listparts_obsolete.json` is a real `/parts` response,
+lightly trimmed. Three things in it contradicted what the hand-written fixtures
+assumed, so prefer it when changing list pricing:
+
+- **`SelectedPackType` came back empty**; the selection lives in
+  `SelectedPackOptionIndex`. `SelectedPackOption` therefore tries the index
+  first and treats the name as a fallback. Matching on the name alone would
+  never fire against real data.
+- **`PackOptions` was an empty array** for an Obsolete, zero-stock part. There
+  is no price anywhere on such a line, which is why it must read as *unpriced*
+  (`unpriced_parts`) rather than free — a zero total that looks like a bargain
+  is the failure mode to avoid.
+- **`DigiKeyPartNumber` differed from `RequestedPartNumber`**: a `490-1532-1-ND`
+  request resolved to the `-2-ND` reel. Never assume the two match.

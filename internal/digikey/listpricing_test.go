@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 )
@@ -517,5 +519,117 @@ func TestAllListPartsDeduplicatesWhenServerIgnoresStartIndex(t *testing.T) {
 	if got.TotalParts != total {
 		t.Errorf("TotalParts = %d, want %d — the shortfall must stay visible to the caller",
 			got.TotalParts, total)
+	}
+}
+
+// The tests above use fixtures this codebase invented. These use a response
+// captured from the live MyLists API, which contradicted two assumptions those
+// fixtures encoded: SelectedPackType came back EMPTY with the selection carried
+// in SelectedPackOptionIndex instead, and PackOptions was an empty array for a
+// part DigiKey would not price.
+func TestRealListPartsResponse(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "listparts_obsolete.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resp PartsResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("the real payload does not decode into PartsResponse: %v", err)
+	}
+
+	if resp.TotalParts != 1 || len(resp.PartsList) != 1 {
+		t.Fatalf("TotalParts=%d, parts=%d, want 1 and 1", resp.TotalParts, len(resp.PartsList))
+	}
+	p := resp.PartsList[0]
+
+	// DigiKey resolves the requested part number to whichever variation it
+	// stocks — here a -1-ND request came back as the -2-ND reel.
+	if p.RequestedPartNumber != "490-1532-1-ND" || p.DigiKeyPartNumber != "490-1532-2-ND" {
+		t.Errorf("requested=%q digikey=%q; the two are expected to differ in this capture",
+			p.RequestedPartNumber, p.DigiKeyPartNumber)
+	}
+	if !p.Flags.IsMatched {
+		t.Error("IsMatched=false; the part did resolve to a catalog product")
+	}
+
+	if len(p.Quantities) != 1 {
+		t.Fatalf("got %d quantity lines, want 1", len(p.Quantities))
+	}
+	q := p.Quantities[0]
+
+	// The finding that drove the index-first lookup: the name is blank and the
+	// index carries the selection. Name matching alone could never fire here.
+	if q.SelectedPackType != "" {
+		t.Errorf("SelectedPackType = %q; the capture has it empty. If DigiKey now "+
+			"populates it, re-check the lookup order in SelectedPackOption", q.SelectedPackType)
+	}
+	if q.SelectedPackOptionIndex == nil {
+		t.Fatal("SelectedPackOptionIndex did not decode; it is the field DigiKey actually fills in")
+	}
+	if *q.SelectedPackOptionIndex != 0 {
+		t.Errorf("SelectedPackOptionIndex = %d, want 0", *q.SelectedPackOptionIndex)
+	}
+
+	// An obsolete, zero-stock part gets no pack options at all, so it is
+	// unpriced rather than free. The index pointing into an empty slice must
+	// not panic or fabricate a price.
+	if len(q.PackOptions) != 0 {
+		t.Fatalf("got %d pack options, want 0 for this obsolete part", len(q.PackOptions))
+	}
+	if _, ok := q.SelectedPackOption(); ok {
+		t.Error("SelectedPackOption() reported a selection for a line with no options")
+	}
+	if got := p.UnitPrice(); got != 0 {
+		t.Errorf("UnitPrice() = %v, want 0", got)
+	}
+	if got := p.ExtendedPrice(); got != 0 {
+		t.Errorf("ExtendedPrice() = %v, want 0", got)
+	}
+	if got := p.RequestedQty(); got != 10 {
+		t.Errorf("RequestedQty() = %d, want 10", got)
+	}
+}
+
+// An out-of-range or negative index must fall through rather than panic —
+// DigiKey uses -1 for "nothing selected".
+func TestSelectedPackOptionIndexBounds(t *testing.T) {
+	idx := func(i int) *int { return &i }
+	options := []ListPackOption{
+		{PackType: "Cut Tape (CT)", CalculatedUnitPrice: 0.048, ExtendedPrice: 0.48},
+		{PackType: "Digi-Reel", CalculatedUnitPrice: 0.10, ExtendedPrice: 1.00},
+	}
+
+	tests := []struct {
+		name     string
+		index    *int
+		packType string
+		wantPack string
+	}{
+		{"index selects the second option", idx(1), "", "Digi-Reel"},
+		{"index 0 selects the first", idx(0), "", "Cut Tape (CT)"},
+		{"negative index falls through to the name", idx(-1), "Digi-Reel", "Digi-Reel"},
+		{"out-of-range index falls through to the name", idx(99), "Digi-Reel", "Digi-Reel"},
+		{"absent index falls through to the name", nil, "Digi-Reel", "Digi-Reel"},
+		{"no index and no name takes the first priced option", nil, "", "Cut Tape (CT)"},
+		// The index wins over a name that disagrees: it is the field DigiKey
+		// actually maintains.
+		{"index outranks a conflicting name", idx(1), "Cut Tape (CT)", "Digi-Reel"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			q := ListPartQuantity{
+				SelectedPackOptionIndex: tt.index,
+				SelectedPackType:        tt.packType,
+				PackOptions:             options,
+			}
+			got, ok := q.SelectedPackOption()
+			if !ok {
+				t.Fatal("SelectedPackOption() ok = false, want a selection")
+			}
+			if got.PackType != tt.wantPack {
+				t.Errorf("pack type = %q, want %q", got.PackType, tt.wantPack)
+			}
+		})
 	}
 }

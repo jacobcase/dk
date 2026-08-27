@@ -129,28 +129,46 @@ type ListPackOption struct {
 
 // ListPartQuantity is the resolved quantity/pricing for a part in a list.
 type ListPartQuantity struct {
-	QuantityRequested  int              `json:"QuantityRequested"`
-	CalculatedQuantity int              `json:"CalculatedQuantity"`
-	TargetPrice        float64          `json:"TargetPrice"`
-	SelectedPackType   string           `json:"SelectedPackType"`
-	PackOptions        []ListPackOption `json:"PackOptions"`
+	QuantityRequested  int     `json:"QuantityRequested"`
+	CalculatedQuantity int     `json:"CalculatedQuantity"`
+	TargetPrice        float64 `json:"TargetPrice"`
+	// SelectedPackOptionIndex points into PackOptions and is what DigiKey
+	// actually populates — observed responses carry the index with
+	// SelectedPackType left empty. A pointer so an absent field is
+	// distinguishable from a genuine index 0; DigiKey uses -1 for "none",
+	// as it does for SelectedSubPackOptionIndex.
+	SelectedPackOptionIndex *int             `json:"SelectedPackOptionIndex"`
+	SelectedPackType        string           `json:"SelectedPackType"`
+	PackOptions             []ListPackOption `json:"PackOptions"`
 }
 
 // SelectedPackOption returns the pack option that applies to this quantity
-// line, and false when the line has no options at all.
+// line, and false when the line carries no options at all.
 //
-// Matching on SelectedPackType is the whole point: taking the first priced
-// option instead would quote a reel price for a line the user set to cut tape,
-// and that price flows straight into the BOM total a human buys from.
+// Identifying the right option matters because its price is what reaches the
+// BOM total a human buys from: quoting the reel price for a line set to cut
+// tape overstates that line several-fold.
 //
-// When the named pack type IS present but DigiKey did not price it, this
-// returns it anyway, with its zero price. That is deliberate. Falling through
-// to some other pack type's price would re-introduce exactly the defect above —
-// quoting a figure for a product the user did not choose — and a zero here is
-// visible: callers surface it as an unpriced line rather than a cheap one.
-// The fallback below therefore only covers a line whose SelectedPackType is
-// absent from PackOptions entirely, or empty.
+// The index is tried first because that is the field DigiKey actually fills
+// in. A captured response carries SelectedPackOptionIndex: 0 alongside
+// SelectedPackType: "", so name matching alone would never fire on real data
+// and every line would fall through to the "first priced" guess. The name is
+// kept as a second key for responses that supply it instead.
+//
+// When the selected option exists but DigiKey did not price it, it is returned
+// as-is with its zero price rather than falling through. Substituting another
+// pack type's price would be the very defect described above, and a zero is
+// visible downstream — callers report it as an unpriced line, not a free one.
 func (q ListPartQuantity) SelectedPackOption() (ListPackOption, bool) {
+	if len(q.PackOptions) == 0 {
+		return ListPackOption{}, false
+	}
+
+	// DigiKey uses -1 for "nothing selected", as it does for the sub-pack index.
+	if i := q.SelectedPackOptionIndex; i != nil && *i >= 0 && *i < len(q.PackOptions) {
+		return q.PackOptions[*i], true
+	}
+
 	if want := strings.TrimSpace(q.SelectedPackType); want != "" {
 		for _, opt := range q.PackOptions {
 			if strings.EqualFold(strings.TrimSpace(opt.PackType), want) {
@@ -158,18 +176,15 @@ func (q ListPartQuantity) SelectedPackOption() (ListPackOption, bool) {
 			}
 		}
 	}
-	// DigiKey named no pack type, or named one it did not return an option for.
+
+	// No usable selection. Prefer a priced option over an unpriced one, so a
+	// line still reports a cost when DigiKey declined to name a choice.
 	for _, opt := range q.PackOptions {
 		if opt.CalculatedUnitPrice > 0 || opt.ExtendedPrice > 0 {
 			return opt, true
 		}
 	}
-	// Nothing priced: return the first option so the pack type is still
-	// reported, or the zero value when there are no options at all.
-	if len(q.PackOptions) > 0 {
-		return q.PackOptions[0], true
-	}
-	return ListPackOption{}, false
+	return q.PackOptions[0], true
 }
 
 // ListPart is a fully resolved part in a list, including live availability.
