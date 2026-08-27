@@ -193,7 +193,7 @@ WHAT ELSE DO I NEED TO BUY?
   Most parts have no associations; an empty result is normal, not an error.
 
 COSTING A QUANTITY
-  dk pricing <part-number> --qty N [--packaging CutTapeOrTR|DigiReelOrTR|StandardPack]
+  dk pricing <part-number> --qty N [--packaging CT|DKR]
 
   Answers "I need N of these — what do I order and what does it cost?" Prices
   every packaging option for the requested quantity.

@@ -137,7 +137,9 @@ func TestPricingSendsRequestedQuantity(t *testing.T) {
 	m := newMockDigiKey(t)
 	m.handle("GET", "/products/v4/search/packagetypebyquantity/X", http.StatusOK, packagingBody)
 
-	if res := run(t, m, "pricing", "X", "--qty", "250", "--packaging", "CutTapeOrTR"); res.Code != ExitOK {
+	// CT and DKR are the only values DigiKey documents for packagingPreference;
+	// the CutTapeOrTR family belongs to MyLists' ListSettings and is ignored here.
+	if res := run(t, m, "pricing", "X", "--qty", "250", "--packaging", "CT"); res.Code != ExitOK {
 		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
 	}
 	var query string
@@ -149,8 +151,8 @@ func TestPricingSendsRequestedQuantity(t *testing.T) {
 	if !strings.Contains(query, "requestedQuantity=250") {
 		t.Errorf("query = %q, want requestedQuantity=250", query)
 	}
-	if !strings.Contains(query, "packagingPreference=CutTapeOrTR") {
-		t.Errorf("query = %q, want the packaging preference forwarded", query)
+	if !strings.Contains(query, "packagingPreference=CT") {
+		t.Errorf("query = %q, want the packaging preference forwarded verbatim", query)
 	}
 }
 

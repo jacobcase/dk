@@ -14,8 +14,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -367,13 +369,27 @@ type ValidationError struct {
 	Message string `json:"Message"`
 }
 
-// apiErrorResponse is DigiKey's shared error envelope.
+// apiErrorResponse is MyLists v1's error envelope (ApiErrorResponse).
 type apiErrorResponse struct {
 	StatusCode       int               `json:"StatusCode"`
 	ErrorMessage     string            `json:"ErrorMessage"`
 	ErrorDetails     string            `json:"ErrorDetails"`
 	RequestID        string            `json:"RequestId"`
 	ValidationErrors []ValidationError `json:"ValidationErrors"`
+}
+
+// problemDetails is Product Information v4's error envelope (DKProblemDetails),
+// an RFC 7807 problem document. The two APIs do not share a shape: this one is
+// lowercase and names its fields differently, so decoding a product error into
+// apiErrorResponse succeeds with every field zero and loses the message, the
+// correlation id, and the per-field validation errors. Both are tried.
+type problemDetails struct {
+	Title         string              `json:"title"`
+	Detail        string              `json:"detail"`
+	Status        int                 `json:"status"`
+	Instance      string              `json:"instance"`
+	CorrelationID string              `json:"correlationId"`
+	Errors        map[string][]string `json:"errors"`
 }
 
 func parseAPIError(resp *http.Response, body []byte) *APIError {
@@ -389,6 +405,29 @@ func parseAPIError(resp *http.Response, body []byte) *APIError {
 		e.ErrorDetails = payload.ErrorDetails
 		e.RequestID = payload.RequestID
 		e.ValidationErrors = payload.ValidationErrors
+	}
+
+	// A body that carried nothing under the MyLists names may still be a
+	// problem document. Only fill what is still empty, so a MyLists reply that
+	// happens to include a lowercase key keeps its own values.
+	if e.ErrorMessage == "" && e.ErrorDetails == "" && e.RequestID == "" && len(e.ValidationErrors) == 0 {
+		var pd problemDetails
+		if err := json.Unmarshal(body, &pd); err == nil {
+			e.ErrorMessage = pd.Title
+			e.ErrorDetails = pd.Detail
+			e.RequestID = pd.CorrelationID
+			// errors maps a field name to its messages; flatten so the JSON
+			// output shape stays the same for callers regardless of which API
+			// failed.
+			for _, field := range slices.Sorted(maps.Keys(pd.Errors)) {
+				for _, msg := range pd.Errors[field] {
+					e.ValidationErrors = append(e.ValidationErrors, ValidationError{
+						Field:   field,
+						Message: msg,
+					})
+				}
+			}
+		}
 	}
 
 	if ra := resp.Header.Get("Retry-After"); ra != "" {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -794,5 +795,65 @@ func TestCreateListOmitsRefListWhenUnset(t *testing.T) {
 	}
 	if _, present := body["RefList"]; present {
 		t.Error("RefList was sent on a plain create; an empty one may be rejected")
+	}
+}
+
+func TestAPIErrorParsesProblemDetails(t *testing.T) {
+	// Product Information v4 answers with DKProblemDetails, an RFC 7807
+	// document, not the PascalCase envelope MyLists uses. Decoding it as the
+	// MyLists shape succeeds with every field zero, which used to leave the
+	// message as a raw JSON dump and drop the correlation id the error's own
+	// doc comment tells callers to quote on a support ticket.
+	body := `{
+	  "type": "https://tools.ietf.org/html/rfc7231#section-6.5.1",
+	  "title": "One or more validation errors occurred.",
+	  "status": 400,
+	  "detail": "See the errors property for details.",
+	  "instance": "/products/v4/search/keyword",
+	  "correlationId": "corr-xyz-789",
+	  "errors": {"Keywords": ["The Keywords field is required."], "Limit": ["Must be 1-50.", "Was 0."]}
+	}`
+	client, _ := newTestClient(t, http.StatusBadRequest, body)
+
+	_, err := client.KeywordSearch(context.Background(), KeywordRequest{})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error type = %T, want *APIError", err)
+	}
+	if apiErr.RequestID != "corr-xyz-789" {
+		t.Errorf("RequestID = %q, want the correlationId", apiErr.RequestID)
+	}
+	if apiErr.ErrorMessage != "One or more validation errors occurred." {
+		t.Errorf("ErrorMessage = %q, want the problem title", apiErr.ErrorMessage)
+	}
+	// Flattened field -> message pairs, sorted by field so the output is stable.
+	want := []ValidationError{
+		{Field: "Keywords", Message: "The Keywords field is required."},
+		{Field: "Limit", Message: "Must be 1-50."},
+		{Field: "Limit", Message: "Was 0."},
+	}
+	if !reflect.DeepEqual(apiErr.ValidationErrors, want) {
+		t.Errorf("ValidationErrors = %+v, want %+v", apiErr.ValidationErrors, want)
+	}
+	// The message must be the title, never the raw body it fell back to before.
+	if msg := apiErr.Message(); strings.Contains(msg, "{") {
+		t.Errorf("Message() = %q, want the decoded title rather than raw JSON", msg)
+	}
+}
+
+func TestAPIErrorPrefersMyListsEnvelopeWhenBothCouldMatch(t *testing.T) {
+	// A MyLists body must not be re-read as a problem document; the PascalCase
+	// values win and nothing from the lowercase shape overwrites them.
+	body := `{"ErrorMessage":"List not found","RequestId":"req-1","title":"ignored","correlationId":"ignored"}`
+	client, _ := newTestClient(t, http.StatusNotFound, body)
+
+	_, err := client.KeywordSearch(context.Background(), KeywordRequest{})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error type = %T, want *APIError", err)
+	}
+	if apiErr.ErrorMessage != "List not found" || apiErr.RequestID != "req-1" {
+		t.Errorf("got message %q / request id %q, want the MyLists values to win",
+			apiErr.ErrorMessage, apiErr.RequestID)
 	}
 }

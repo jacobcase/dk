@@ -137,7 +137,11 @@ account-specific pricing is used instead of list pricing.`,
 
 	f := cmd.Flags()
 	f.IntVarP(&quantity, "qty", "n", 1, "quantity you want to end up with")
-	f.StringVar(&preference, "packaging", "", "packaging preference passed to DigiKey, e.g. CutTapeOrTR, DigiReelOrTR, StandardPack")
+	// DigiKey documents exactly two values for this query parameter on
+	// packagetypebyquantity: CT (cut tape) and DKR (Digi-Reel). It selects the
+	// packaging for the remainder outside a standard reel. Anything else is
+	// ignored server-side, silently costing the remainder at the default.
+	f.StringVar(&preference, "packaging", "", "packaging for the remainder quantity: CT (cut tape) or DKR (Digi-Reel)")
 
 	return cmd
 }

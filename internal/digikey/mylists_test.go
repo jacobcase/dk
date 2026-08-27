@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -506,11 +507,17 @@ func TestAllListsPagesUntilShortPage(t *testing.T) {
 	if all[len(all)-1].ID != "last" {
 		t.Errorf("last list = %q, want the entry from page two", all[len(all)-1].ID)
 	}
-	if len(gotQueries) != 2 {
-		t.Fatalf("made %d list requests (%v), want 2", len(gotQueries), gotQueries)
+	// Three requests, not two: DigiKey documents /lists as 50 per page while
+	// this asks for 100, so a short page is not evidence of the end and the
+	// walk confirms with one more request that returns nothing new.
+	if len(gotQueries) != 3 {
+		t.Fatalf("made %d list requests (%v), want 3", len(gotQueries), gotQueries)
 	}
 	if !strings.Contains(gotQueries[1], "startIndex=100") {
 		t.Errorf("second request query = %q, want startIndex=100", gotQueries[1])
+	}
+	if !strings.Contains(gotQueries[2], "startIndex=101") {
+		t.Errorf("third request query = %q, want startIndex=101 (resumed from rows held)", gotQueries[2])
 	}
 }
 
@@ -573,5 +580,57 @@ func TestMyListsErrorSurfacesRequestID(t *testing.T) {
 	}
 	if apiErr.RequestID != "req-9" {
 		t.Errorf("RequestID = %q, want req-9", apiErr.RequestID)
+	}
+}
+
+func TestAllListsSurvivesAServerThatCapsThePage(t *testing.T) {
+	// The spec documents /lists as 50 per page while AllLists asks for 100, so
+	// the first response is expected to be shorter than requested. Treating
+	// that as the end returned the first 50 lists and reported them complete —
+	// which makes ResolveList answer not_found for a list that exists, on the
+	// write paths as well as the read ones.
+	const total = 120
+	const serverCap = 50
+
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/oauth2/token" {
+			_, _ = io.WriteString(w, `{"access_token":"tok","expires_in":1800}`)
+			return
+		}
+		requests++
+		start, _ := strconv.Atoi(r.URL.Query().Get("startIndex"))
+		end := min(start+serverCap, total)
+
+		var b strings.Builder
+		b.WriteString("[")
+		for i := start; i < end; i++ {
+			if i > start {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, `{"Id":"id-%d","ListName":"List %d"}`, i, i)
+		}
+		b.WriteString("]")
+		_, _ = io.WriteString(w, b.String())
+	}))
+	defer srv.Close()
+
+	c, err := New(Options{BaseURL: srv.URL, ClientID: "id", Tokens: &staticTokens{app: "a", user: "u"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := c.AllLists(context.Background())
+	if err != nil {
+		t.Fatalf("AllLists() error = %v", err)
+	}
+	if len(all) != total {
+		t.Fatalf("AllLists() returned %d lists, want all %d: a capped page is not the end of the list", len(all), total)
+	}
+	if all[total-1].ID != fmt.Sprintf("id-%d", total-1) {
+		t.Errorf("last list = %q, want id-%d", all[total-1].ID, total-1)
+	}
+	if requests < 3 {
+		t.Errorf("made %d requests, want at least 3 to walk %d lists at %d per page", requests, total, serverCap)
 	}
 }

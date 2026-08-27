@@ -321,31 +321,64 @@ func (c *Client) Lists(ctx context.Context, startIndex, limit int) ([]ListSummar
 	return out, nil
 }
 
-// Paging bounds for AllLists. DigiKey's default page size is smaller than this
-// and undocumented, which is why resolving a name cannot trust one request.
-// maxListPages guards against a server that ignores startIndex and would
-// otherwise make the loop run forever.
+// Paging bounds for AllLists. The spec documents /lists as defaulting to 50 per
+// page, so asking for listPageSize is asking for more than DigiKey promises;
+// the loop below therefore cannot treat a short page as the end. maxListPages
+// guards against a server that ignores startIndex and would otherwise make the
+// loop run forever.
 const (
 	listPageSize = 100
-	maxListPages = 50
+	maxListPages = 500
 )
 
-// AllLists returns every list the account owns, paging until DigiKey returns a
-// short page. Resolving a list by name needs the complete set: a list on page
-// two is otherwise indistinguishable from one that does not exist.
+// AllLists returns every list the account owns. Resolving a list by name needs
+// the complete set: a list on page two is otherwise indistinguishable from one
+// that does not exist, which turns into a false not_found for every command
+// that resolves a name — including the ones that then write to it.
 func (c *Client) AllLists(ctx context.Context) ([]ListSummary, error) {
-	var all []ListSummary
-	for page := 0; page < maxListPages; page++ {
-		batch, err := c.Lists(ctx, page*listPageSize, listPageSize)
+	all := []ListSummary{}
+	seen := make(map[string]bool)
+
+	for range maxListPages {
+		// Resume from what we actually hold rather than from page*pageSize, and
+		// do not stop on a short page. DigiKey documents /lists as 50 per page
+		// while this asks for 100, so the very first response is expected to be
+		// "short" — treating that as the end would return the first 50 lists and
+		// report them as complete. Same reasoning as AllListParts below.
+		batch, err := c.Lists(ctx, len(all), listPageSize)
 		if err != nil {
 			return nil, err
 		}
-		all = append(all, batch...)
-		if len(batch) < listPageSize {
+
+		// Count only lists we have not already seen. A server that ignores
+		// startIndex resends the same page forever; without this the loop would
+		// pile up duplicates until the page cap.
+		added := 0
+		for _, l := range batch {
+			if l.ID != "" {
+				if seen[l.ID] {
+					continue
+				}
+				seen[l.ID] = true
+			}
+			all = append(all, l)
+			added++
+		}
+
+		// A page that added nothing new ends the walk — but only if it was not
+		// a full page. A *full* page of rows we already hold means the server
+		// ignored startIndex and is resending page one; returning there would
+		// silently truncate, which is the failure this function exists to
+		// prevent, so it is an error instead.
+		if added == 0 {
+			if len(batch) == listPageSize {
+				break
+			}
 			return all, nil
 		}
 	}
-	return nil, fmt.Errorf("digikey returned more than %d lists; refusing to page further", listPageSize*maxListPages)
+	return nil, fmt.Errorf("digikey did not finish paging lists after %d requests (%d lists so far)",
+		maxListPages, len(all))
 }
 
 // GetList returns a list's metadata and requested parts by id.

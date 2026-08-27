@@ -302,8 +302,10 @@ func TestListWritesResolveTheNameLive(t *testing.T) {
 			t.Fatalf("list delete issued %s %s: the name was resolved from the cached listing", r.Method, r.Path)
 		}
 	}
-	if got := m.apiCalls("/mylists/v1/lists"); got != 2 {
-		t.Errorf("the API saw %d listing reads, want 2: the name a write resolves must not come from the cache", got)
+	// Two GETs per walk: AllLists cannot trust a short page as the end, so it
+	// confirms with one more request. Two live walks is therefore 4.
+	if got := m.apiCalls("/mylists/v1/lists"); got != 4 {
+		t.Errorf("the API saw %d listing reads, want 4 (2 walks x 2): the name a write resolves must not come from the cache", got)
 	}
 }
 
@@ -321,8 +323,10 @@ func TestListShowStillResolvesTheNameFromTheCache(t *testing.T) {
 	// The counterpart to the test above: reads are what the cache is for, and
 	// making every list command resolve live would give it nothing to do in the
 	// workflow it was built for.
-	if got := m.apiCalls("/mylists/v1/lists"); got != 1 {
-		t.Errorf("the API saw %d listing reads, want 1: a read must still be served from the cache", got)
+	// One walk is 2 GETs (see above); the second run adds none, which is the
+	// point — both of the first walk's requests came back from the cache.
+	if got := m.apiCalls("/mylists/v1/lists"); got != 2 {
+		t.Errorf("the API saw %d listing reads, want 2 (1 walk x 2): a read must still be served from the cache", got)
 	}
 }
 
