@@ -107,6 +107,24 @@ func (r result) ErrorJSON(t *testing.T) errorPayload {
 	return p
 }
 
+// TestMain clears the environment variables that point dk at real user state,
+// once for the whole package, since the helpers below are not the only place
+// tests set them.
+//
+// DK_CACHE_DIR is the one that matters: config.CacheDir() checks it ahead of
+// DK_CONFIG_DIR, so a developer or CI runner with it exported would have this
+// suite read, write, and — in TestCacheStatusAndClear — delete their real
+// cache directory. DK_CACHE_TTL is cleared for a quieter reason: exported as 0
+// it would make every cache test pass while measuring nothing.
+func TestMain(m *testing.M) {
+	for _, key := range []string{"DK_CACHE_DIR", "DK_CACHE_TTL", "DK_CONFIG_DIR"} {
+		if err := os.Unsetenv(key); err != nil {
+			panic(err)
+		}
+	}
+	os.Exit(m.Run())
+}
+
 // run executes dk in-process with the environment pointed at the mock server.
 // Output goes to buffers, which are never terminals, so --output defaults to
 // JSON exactly as it would for a program capturing dk's stdout.

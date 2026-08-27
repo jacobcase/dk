@@ -83,18 +83,35 @@ func (m *Manager) httpClient() *http.Client {
 	return http.DefaultClient
 }
 
-// Token returns a bearer token. When requireUser is true only a 3-legged token
-// will do, and ErrLoginRequired is returned if none can be produced.
-func (m *Manager) Token(ctx context.Context, requireUser bool) (string, error) {
+// Token returns a bearer token and whether it came from the authorization-code
+// grant. When requireUser is true only a 3-legged token will do, and
+// ErrLoginRequired is returned if none can be produced.
+//
+// The caller cannot work the grant out for itself, because PreferUser means a
+// 3-legged token may answer a request that did not require one. It matters
+// downstream: such a token returns account-specific pricing, so it partitions
+// the response cache.
+func (m *Manager) Token(ctx context.Context, requireUser bool) (string, bool, error) {
 	if requireUser {
-		return m.UserToken(ctx)
+		tok, err := m.UserToken(ctx)
+		if err != nil {
+			return "", false, err
+		}
+		// Stated, not inferred from the error. This flag partitions the response
+		// cache, so tying it to an error check would let any future path that
+		// returns a usable token alongside a non-nil error — a refresh that
+		// succeeded but failed to persist, say — file account-specific pricing
+		// under the app grant, where a genuinely 2-legged read is later served
+		// it.
+		return tok, true, nil
 	}
 	if m.PreferUser {
 		if tok, err := m.UserToken(ctx); err == nil {
-			return tok, nil
+			return tok, true, nil
 		}
 	}
-	return m.AppToken(ctx)
+	tok, err := m.AppToken(ctx)
+	return tok, false, err
 }
 
 // AppToken returns a cached or freshly minted client-credentials token.

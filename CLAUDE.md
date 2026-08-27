@@ -23,8 +23,10 @@ internal/digikey/  typed client for Product Information v4 and MyLists v1
 internal/auth/     both OAuth flows, token cache, HTTPS callback listener
 internal/config/   config file + env resolution (~/.config/dk, XDG not
                    os.UserConfigDir — see Dir())
+internal/cache/    on-disk response cache, keyed per token/locale/query
 internal/output/   json / table / csv rendering
-internal/atomicfile/  crash-safe file replacement, shared by config and auth
+internal/atomicfile/  crash-safe file replacement, shared by config, auth, and
+                   the response cache
 ```
 
 ## Design invariants
@@ -72,6 +74,108 @@ Break these and the CLI stops being safe to drive from a program:
   through the facets rather than making callers pass opaque ids. When a name
   fails to resolve, the error lists what *is* available — that is what lets an
   agent self-correct in one round trip instead of two.
+
+## Response cache
+
+`Client.do` serves and stores responses for requests marked with a `cacheScope`.
+The rules that keep it from being worse than no cache at all:
+
+- **Caching is opt-in per request, never per method.** A new endpoint gets no
+  cache until someone sets `cacheScope` on it. `SuggestListName` is the reason:
+  it is a GET, and caching it would hand `--auto-rename` a name that has since
+  been taken — the one thing that call exists to prevent.
+- **Only successful responses are stored, and only once they decode.** A cached
+  429 or 401 outlives the condition that produced it and turns a transient
+  failure into a sticky one. A 2xx whose body is not the expected JSON — a proxy
+  interstitial, a WAF challenge — is the same failure wearing a successful
+  status, so `do` decodes before it calls `Put`; stored, it would replay its
+  decode error from disk until the TTL ran out, and no retry could clear it.
+- **The key covers everything that changes the answer**, not just the URL: the
+  grant, the client and account ids, the locale, and the request body. The grant
+  is in there because a 3-legged token returns account-specific pricing, so the
+  same query under the two grants is two different documents. Serving one for
+  the other would misprice a BOM, which is the same class of bug as pairing a
+  part number with another variation's price. The environment needs no element:
+  `endpoint` carries the base URL.
+- **The key names the grant, never the token.** `TokenSource.Token` reports
+  which grant answered, because the caller cannot infer it — a cached 3-legged
+  token is preferred everywhere, so it may answer a request that did not require
+  one. Keying on the token bytes was correct and unaffordable: DigiKey's
+  `client_credentials` token lives 600s against a 10m TTL, so the namespace
+  rotated about as fast as entries expired. The refresh token is no better —
+  DigiKey rotates it on every grant. What the fingerprint separated incidentally
+  was one login's entries from the next, so `dk auth login` and `dk auth logout`
+  call `dropCachedResponses`; that is exact, and it keeps a credential out of a
+  string that decides a file name.
+- **Scopes exist so a list write does not throw away catalog reads.** MyLists
+  mutations set `invalidates: ScopeLists`; searches live in `ScopeProduct` and
+  survive. Without that split the cache would be useless in the workflow it was
+  built for — search, add, search again.
+- **Invalidation is not conditional on this run reading the cache.** `--cache-ttl
+  0` and `DK_CACHE_TTL=0` turn off `Get` and `Put`, not `Invalidate`: what an
+  earlier run stored for a list this one just changed has to go regardless.
+  `cache.New` therefore returns a usable `*Cache` for a zero TTL — only an empty
+  directory yields nil — and `App.Cache()` no longer short-circuits. Gating
+  invalidation on the read setting is how `dk list add --cache-ttl 0` left the
+  next `dk list show` serving the contents from before the add.
+- **Invalidation happens on the write attempt, not on its reply.** The
+  `Invalidate` is a `defer` registered before `httpc.Do`, so a timeout, a
+  connection reset, or a 5xx after the mutation landed still drops the scope. A
+  lost reply is no evidence that the write did not arrive, and this is the one
+  cache failure that answers with something a write already changed. Dropping a
+  scope for a write that never reached DigiKey costs a refetch.
+- **Every read a write is aimed at goes through `digikey.Live(ctx)`.** `dk list
+  rm`/`list set` turn a part number into the unique id they are about to write
+  to, `dk list set` re-sends the `RequestedPart` it read (DigiKey's update is a
+  replace, not a patch), and `dk list delete`'s `--force` guard decides a
+  permanent delete from a part count. A stale answer there is not an
+  out-of-date figure on a screen; it is a write pointed at the wrong line, a
+  field silently reverted, or a filled list discarded. `Live` bypasses the read
+  and still refreshes the entry, exactly like `--no-cache`.
+
+  **The name lookup counts as such a read.** `ResolveList` reads the cached
+  listing, and a name that has been renamed or recreated since resolves to a
+  different list — which is where the write then lands. `resolveListForWrite` is
+  the one entry point for the commands that mutate; `list show` and `list
+  export` call `ResolveList` directly and stay cached, which is the point.
+- **The cache stores response bytes, not decoded structs**, so `--raw` and the
+  typed path share one entry. Storing decoded structs would double the traffic
+  *and* re-introduce the field loss `--raw` exists to avoid.
+- **Freshness is the entry's mtime against the current TTL**, and `Put` stamps
+  the file from the cache's own clock. One source of time, and lowering
+  `--cache-ttl` takes effect at once rather than after the old entries age out.
+
+`config.CacheDir()` honors `DK_CONFIG_DIR` even though the cache is not the
+config directory: that variable is dk's isolation lever, and a cache that
+escaped it would let one test read another's responses and pollute the real
+user cache. `DK_CACHE_DIR` is checked *first*, so `internal/cli`'s `TestMain`
+clears it (along with `DK_CACHE_TTL`) before anything runs — a developer with it
+exported would otherwise have the suite write to, and `cache clear`, their real
+cache. Tests share a config dir across invocations on purpose — the cache only
+pays off between processes, so a per-run temp dir would test nothing.
+
+No branch of `CacheDir()` returns the variable it was handed: each ends in a
+directory dk owns and created — `dk` under `DK_CACHE_DIR`, `cache` under
+`DK_CONFIG_DIR`, which is already a directory dk was given. The returned path is
+what `dk cache clear` deletes, and `DK_CACHE_DIR=$HOME dk cache clear` erasing a
+home directory is the failure that rule exists to prevent.
+
+Nothing in the package removes a file it did not write or a directory it did not
+fill. `Clear`, `Invalidate`, and `prune` delete only names matching
+`sha256hex + .json` (`isEntryName`) or the `.tmp` file an interrupted
+`atomicfile.Write` left beside one (`isTempName`), and they `rmdir` the scope
+*only after removing something* — an empty directory whose name merely passes
+`validScope` may be the user's, since the root is whatever `DK_CACHE_DIR` named.
+`Stat` reads the same single level, so nothing it counts is beyond `Clear`'s
+reach; it counts entries only, since a half-written file is not a response
+anyone can be served.
+
+The `cache_ttl` value is parsed in `App.CacheTTL()`, not in `setup()`. Validating
+it for every command would make an unparseable value in config.json fail `dk
+config set cache_ttl` — the command that repairs it — and `dk cache clear` along
+with it, leaving hand-editing the JSON as the only way out. `dk cache clear`
+ignores the parse error outright: it needs the TTL only for a count it does not
+print, and it is one of the two exits from a broken configuration.
 
 ## Parametric filtering
 

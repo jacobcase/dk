@@ -15,21 +15,29 @@ import (
 // staticTokens is a TokenSource that returns fixed values and records whether a
 // user token was demanded.
 type staticTokens struct {
-	app           string
-	user          string
+	app  string
+	user string
+	// preferUser makes the user token answer requests that did not ask for it,
+	// as auth.Manager does whenever a 3-legged token is cached.
+	preferUser    bool
 	userErr       error
 	requestedUser bool
 }
 
-func (s *staticTokens) Token(_ context.Context, requireUser bool) (string, error) {
+func (s *staticTokens) Token(_ context.Context, requireUser bool) (string, bool, error) {
 	if requireUser {
 		s.requestedUser = true
 		if s.userErr != nil {
-			return "", s.userErr
+			return "", false, s.userErr
 		}
-		return s.user, nil
+		return s.user, true, nil
 	}
-	return s.app, nil
+	// preferUser mirrors auth.Manager: a cached 3-legged token answers even a
+	// request that did not require one, and reports itself as such.
+	if s.preferUser && s.user != "" {
+		return s.user, true, nil
+	}
+	return s.app, false, nil
 }
 
 // capture records the last request a test server received.

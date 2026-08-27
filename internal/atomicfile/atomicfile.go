@@ -1,9 +1,10 @@
 // Package atomicfile writes files in a way that a crash cannot leave
 // half-written.
 //
-// dk uses it for the two files it owns — the config and the token cache — both
-// of which hold credentials and both of which would strand the user if a
-// truncated write survived.
+// dk uses it for the files it owns: the config and the token cache, which hold
+// credentials and would strand the user if a truncated write survived, and the
+// response cache, where a truncated entry would be served as a whole response
+// for the rest of its TTL.
 package atomicfile
 
 import (

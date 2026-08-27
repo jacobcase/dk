@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/jacobcase/dk/internal/auth"
+	"github.com/jacobcase/dk/internal/cache"
 	"github.com/jacobcase/dk/internal/config"
 	"github.com/jacobcase/dk/internal/digikey"
 	"github.com/jacobcase/dk/internal/output"
@@ -39,9 +40,14 @@ type App struct {
 	// Timeout bounds every HTTP request dk makes.
 	Timeout time.Duration
 
+	// NoCache ignores what is stored without disabling storing. The freshness
+	// window itself is resolved on demand by CacheTTL().
+	NoCache bool
+
 	store   *auth.Store
 	manager *auth.Manager
 	client  *digikey.Client
+	cache   *cache.Cache
 
 	// setupRan records whether PersistentPreRunE executed. Cobra validates the
 	// command name, flags, and argument counts before that hook, so an error
@@ -58,6 +64,11 @@ type App struct {
 	flagLanguage     string
 	flagCurrency     string
 	flagTimeout      time.Duration
+	flagNoCache      bool
+	flagCacheTTL     time.Duration
+	// cacheTTLSet records whether --cache-ttl was passed, since its zero value
+	// is a meaningful setting rather than an absent one.
+	cacheTTLSet bool
 }
 
 // httpClient returns the shared HTTP client honoring --timeout.
@@ -122,6 +133,53 @@ func (a *App) Auth() (*auth.Manager, error) {
 	return a.manager, nil
 }
 
+// CacheTTL resolves how long a cached API response stays fresh: --cache-ttl
+// when it was passed, otherwise DK_CACHE_TTL or the config file. Zero means the
+// response cache is off.
+//
+// The error is classified as a config error so that the exit code and the JSON
+// error.code agree, and carries the hint naming the setting to fix.
+func (a *App) CacheTTL() (time.Duration, error) {
+	if a.cacheTTLSet {
+		return a.flagCacheTTL, nil
+	}
+	ttl, err := a.Cfg.CacheTTLDuration()
+	if err != nil {
+		return 0, &Error{
+			Code:     CodeConfig,
+			Message:  err.Error(),
+			Hint:     "Set a duration like `dk config set cache_ttl 10m`, or 0 to disable the response cache.",
+			ExitCode: ExitConfig,
+			Err:      err,
+		}
+	}
+	return ttl, nil
+}
+
+// Cache returns the on-disk response cache, or nil when there is no directory
+// to put it in.
+//
+// It is returned even when the TTL is zero, which is what switches caching off.
+// A zero-TTL cache reads and writes nothing but still invalidates, so a list
+// write made with the cache off does not leave an earlier run's entries behind
+// for the next run to serve. Deciding not to read the cache is a preference;
+// not stranding a stale list read is not.
+func (a *App) Cache() (*cache.Cache, error) {
+	if a.cache != nil {
+		return a.cache, nil
+	}
+	ttl, err := a.CacheTTL()
+	if err != nil {
+		return nil, err
+	}
+	dir, err := config.CacheDir()
+	if err != nil {
+		return nil, err
+	}
+	a.cache = cache.New(dir, ttl)
+	return a.cache, nil
+}
+
 // Client returns the DigiKey API client.
 func (a *App) Client() (*digikey.Client, error) {
 	if a.client != nil {
@@ -130,6 +188,17 @@ func (a *App) Client() (*digikey.Client, error) {
 	manager, err := a.Auth()
 	if err != nil {
 		return nil, err
+	}
+	responses, err := a.Cache()
+	if err != nil {
+		return nil, err
+	}
+	// Assigned through a nil check rather than directly: a nil *cache.Cache
+	// stored in a non-nil interface would make every "is caching on" test in
+	// the client come out true.
+	var responseCache digikey.ResponseCache
+	if responses != nil {
+		responseCache = responses
 	}
 	client, err := digikey.New(digikey.Options{
 		BaseURL:   a.Cfg.BaseURL(),
@@ -140,9 +209,11 @@ func (a *App) Client() (*digikey.Client, error) {
 			Language: a.Cfg.Locale.Language,
 			Currency: a.Cfg.Locale.Currency,
 		},
-		Tokens:     manager,
-		HTTPClient: a.httpClient(),
-		UserAgent:  "dk/" + Version,
+		Tokens:       manager,
+		HTTPClient:   a.httpClient(),
+		UserAgent:    "dk/" + Version,
+		Cache:        responseCache,
+		CacheRefresh: a.NoCache,
 	})
 	if err != nil {
 		return nil, err
@@ -235,6 +306,8 @@ Run "dk guide" for a condensed reference aimed at automated callers.`,
 	f.StringVar(&app.flagLanguage, "language", "", "locale language code, e.g. en, de")
 	f.StringVar(&app.flagCurrency, "currency", "", "pricing currency code, e.g. USD, EUR")
 	f.DurationVar(&app.flagTimeout, "timeout", 30*time.Second, "per-request timeout")
+	f.BoolVar(&app.flagNoCache, "no-cache", false, "ignore cached responses and ask DigiKey (the fresh reply still replaces the cached one)")
+	f.DurationVar(&app.flagCacheTTL, "cache-ttl", 0, "how long a cached response stays fresh; 0 disables the cache (default from config, "+config.DefaultCacheTTL+")")
 
 	_ = root.RegisterFlagCompletionFunc("output", func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
 		return output.Formats(), cobra.ShellCompDirectiveNoFileComp
@@ -255,6 +328,7 @@ Run "dk guide" for a condensed reference aimed at automated callers.`,
 		newListCommand(app),
 		newAuthCommand(app),
 		newConfigCommand(app),
+		newCacheCommand(app),
 		newGuideCommand(app),
 		newVersionCommand(app),
 	)
@@ -308,6 +382,26 @@ func (a *App) setup(cmd *cobra.Command) error {
 		a.Timeout = 30 * time.Second
 	}
 
+	// --cache-ttl beats DK_CACHE_TTL and the config file, but only when it was
+	// actually passed: its zero value means "disabled", so treating an unset
+	// flag as a value would turn the cache off for everyone.
+	//
+	// The configured value is not parsed here. Every other config field is
+	// validated inside the accessor that needs it, and for the same reason: a
+	// bad cache_ttl rejected in this hook would fail every command, including
+	// `dk config set cache_ttl` — the one that repairs it — and `dk cache
+	// clear`, leaving hand-editing config.json as the only way out.
+	a.cacheTTLSet = cmd.Flags().Changed("cache-ttl")
+	if a.cacheTTLSet && a.flagCacheTTL < 0 {
+		return usageErrorf("--cache-ttl must not be negative (pass 0 to disable the cache)")
+	}
+	// Applied only when the flag was actually passed, exactly as --cache-ttl
+	// above: NoCache is part of App's surface, and an in-process caller that
+	// set it before Execute must not have it reset to a flag's zero value.
+	if cmd.Flags().Changed("no-cache") {
+		a.NoCache = a.flagNoCache
+	}
+
 	format, err := output.ParseFormat(a.flagOutput)
 	if err != nil {
 		return usageErrorf("%s", err.Error())
@@ -319,6 +413,7 @@ func (a *App) setup(cmd *cobra.Command) error {
 	// (only relevant to in-process tests that reuse an App).
 	a.manager = nil
 	a.client = nil
+	a.cache = nil
 	return nil
 }
 

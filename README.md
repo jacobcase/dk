@@ -132,6 +132,7 @@ dk list export <list>         BOM-shaped output, pairs with --output csv
 
 dk auth login|status|logout   authentication
 dk config show|set|path       configuration
+dk cache status|clear         cached API responses
 dk guide                      condensed reference for scripts and agents
 dk version
 ```
@@ -393,16 +394,70 @@ Resolution order, highest first:
 | `locale.site` | `DIGIKEY_LOCALE_SITE` | `US` |
 | `locale.language` | `DIGIKEY_LOCALE_LANGUAGE` | `en` |
 | `locale.currency` | `DIGIKEY_LOCALE_CURRENCY` | `USD` |
+| `cache_ttl` | `DK_CACHE_TTL` | `10m` |
 
 Config and the token cache live in `$XDG_CONFIG_HOME/dk`, defaulting to
 `~/.config/dk` — including on macOS, alongside the other command-line tools,
 rather than in `~/Library/Application Support`. Windows uses `%AppData%\dk`.
 
-`DK_CONFIG_DIR` relocates the config and token directory. `DIGIKEY_API_BASE_URL`
-points dk at a different host, which is how the test suite runs against a mock.
+Cached responses live in `$XDG_CACHE_HOME/dk` (`~/.cache/dk`, `%LocalAppData%\dk`
+on Windows) — separate from the config, because deleting them costs a few API
+calls while deleting the config costs a login.
+
+`DK_CONFIG_DIR` relocates the config and token directory, and the cache with it,
+so one variable contains dk's whole on-disk footprint. `DK_CACHE_DIR` moves only
+the cache; like every other location, it names a parent rather than the
+directory itself, and dk keeps its files one level inside it, so `dk cache
+clear` never deletes anything but its own — foreign files and directories
+sharing the parent are left where they are. `DIGIKEY_API_BASE_URL` points dk at
+a different host, which is how the test suite runs against a mock.
 
 `dk config set` only ever writes what you pass it — a secret exported into the
 environment is never persisted to disk as a side effect.
+
+## Response cache
+
+DigiKey's API is rate limited, and dk is a one-shot process, so running the same
+search twice — once to read, once to pipe somewhere — used to cost two requests
+out of that quota. Successful catalog and list reads are now cached on disk for
+ten minutes and an identical read is served from there.
+
+```
+dk search "0.1uF 0603" --output json                 # one API call
+dk search "0.1uF 0603" --output json | jq '.products[].digikey_part_number'
+                                                     # same question, served from disk
+dk search "0.1uF 0603" --limit 50 --output json      # a different question: one more call
+```
+
+Only reads are cached, and only successful ones — a rate-limit reply or an
+expired token is never stored. Writing to a list drops the cached list reads
+immediately, so `dk list show` always reflects the `dk list add` that just ran;
+catalog entries survive that, which is what keeps the cache useful across a
+search-add-search loop. That invalidation happens even when the cache is
+switched off for the invocation doing the writing, since what an earlier run
+stored would otherwise outlive the change.
+
+The read a write depends on is never served from the cache: `dk list rm` and
+`dk list set` resolve a part number to a line id against live contents, and the
+part count that decides whether `dk list delete` demands `--force` is asked of
+the API every time. Entries are written `0600` because with a user token in
+play they carry account-specific pricing.
+
+| Control | Effect |
+|---|---|
+| `--no-cache` | ask DigiKey even if an entry is fresh, and replace it |
+| `--cache-ttl 30s` | shorten the window for one invocation |
+| `--cache-ttl 0` | switch the cache off for one invocation |
+| `dk config set cache_ttl 0` | switch it off permanently |
+| `dk cache status` | where entries live, how many, how much disk |
+| `dk cache clear` | delete them all |
+
+Stock and price move. An entry can be up to the TTL old, so pass `--no-cache`
+before quoting a figure someone is about to act on.
+
+Entries are keyed by the grant they were read under — a logged-in token returns
+account-specific pricing — so `dk auth login` and `dk auth logout` empty the
+cache rather than risk serving one account's prices to another.
 
 ## For agents
 

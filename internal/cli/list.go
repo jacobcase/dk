@@ -185,6 +185,21 @@ func entryView(p digikey.RequestedPart) ListEntryView {
 	}
 }
 
+// resolveListForWrite resolves a list reference for a command that is about to
+// write to, or delete, what it names.
+//
+// The listing ResolveList reads is cached, and a stale name-to-id mapping is
+// not an out-of-date figure on a screen: a list renamed or recreated on
+// digikey.com since the entry was stored resolves the same name to a different
+// list, and the write lands there. Live, for the same reason the parts reads in
+// `dk list set` and `dk list delete` are.
+//
+// `dk list show` and `dk list export` deliberately do not use this. They read,
+// and reading from the cache is what it is for.
+func resolveListForWrite(ctx context.Context, client *digikey.Client, ref string) (*digikey.ListSummary, error) {
+	return client.ResolveList(digikey.Live(ctx), ref)
+}
+
 func newListSetCommand(app *App) *cobra.Command {
 	var (
 		qty     int
@@ -232,7 +247,7 @@ mint a new one and lose the reference designators and notes.`,
 			if err != nil {
 				return err
 			}
-			summary, err := client.ResolveList(ctx, listRef)
+			summary, err := resolveListForWrite(ctx, client, listRef)
 			if err != nil {
 				return err
 			}
@@ -240,7 +255,12 @@ mint a new one and lose the reference designators and notes.`,
 			// Resolve the target against the fully-resolved parts, which carry
 			// every part number the user might have typed. Every page of them:
 			// a part on page two would otherwise report as not found.
-			parts, err := client.AllListParts(ctx, summary.ID, app.locale())
+			//
+			// Live, because this read produces the unique id the update is
+			// aimed at: a cached one may name a line that has since changed or
+			// gone, which writes to the wrong part rather than reporting a
+			// stale figure.
+			parts, err := client.AllListParts(digikey.Live(ctx), summary.ID, app.locale())
 			if err != nil {
 				return err
 			}
@@ -262,7 +282,14 @@ mint a new one and lose the reference designators and notes.`,
 
 			// DigiKey's update is a replace, not a patch, so read the existing
 			// RequestedPart and modify it rather than sending a partial object.
-			full, err := client.GetList(ctx, summary.ID)
+			//
+			// Live, for two reasons. Every field no flag names is echoed
+			// straight back, so a cached copy silently reverts a note or a
+			// reference designator edited elsewhere since it was stored. And
+			// this has to see the same lines the match above saw: that read is
+			// Live, so a part added since would be found there and missing
+			// here, reporting a plainly present part as an unknown unique id.
+			full, err := client.GetList(digikey.Live(ctx), summary.ID)
 			if err != nil {
 				return err
 			}
@@ -384,7 +411,7 @@ reviewed. The copy is independent: editing it does not affect the source.`,
 			if err != nil {
 				return err
 			}
-			source, err := client.ResolveList(ctx, args[0])
+			source, err := resolveListForWrite(ctx, client, args[0])
 			if err != nil {
 				return err
 			}
@@ -796,7 +823,7 @@ the ones that do not resolve.`,
 			if err != nil {
 				return err
 			}
-			summary, err := client.ResolveList(ctx, listRef)
+			summary, err := resolveListForWrite(ctx, client, listRef)
 			if err != nil {
 				return err
 			}
@@ -1051,15 +1078,17 @@ a part number as it appears in the list:
 			if err != nil {
 				return err
 			}
-			summary, err := client.ResolveList(ctx, args[0])
+			summary, err := resolveListForWrite(ctx, client, args[0])
 			if err != nil {
 				return err
 			}
 
 			// Fetch the current contents so part numbers can be mapped to the
 			// unique ids the delete endpoint requires. All of them: removing a
-			// part on page two must not report it as absent.
-			parts, err := client.AllListParts(ctx, summary.ID, app.locale())
+			// part on page two must not report it as absent. Live, for the same
+			// reason as `dk list set` — these ids are what the delete is aimed
+			// at, and a cached id can name a line that no longer exists.
+			parts, err := client.AllListParts(digikey.Live(ctx), summary.ID, app.locale())
 			if err != nil {
 				return err
 			}
@@ -1188,7 +1217,7 @@ func newListRenameCommand(app *App) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			summary, err := client.ResolveList(ctx, args[0])
+			summary, err := resolveListForWrite(ctx, client, args[0])
 			if err != nil {
 				return err
 			}
@@ -1223,7 +1252,7 @@ discard a list it did not mean to touch.`,
 			if err != nil {
 				return err
 			}
-			summary, err := client.ResolveList(ctx, args[0])
+			summary, err := resolveListForWrite(ctx, client, args[0])
 			if err != nil {
 				return err
 			}
@@ -1234,7 +1263,12 @@ discard a list it did not mean to touch.`,
 				// a permanent delete on a stale zero would discard a list that
 				// had just been filled, so ask the parts endpoint instead. One
 				// row is enough: TotalParts rides along with it.
-				count, err := client.ListParts(ctx, summary.ID, 0, 1, app.locale())
+				//
+				// The parts endpoint is itself cached, so this read is marked
+				// Live. A `dk list show` from earlier in the session would
+				// otherwise answer it, and this guard is the only thing
+				// standing between a filled list and a permanent delete.
+				count, err := client.ListParts(digikey.Live(ctx), summary.ID, 0, 1, app.locale())
 				if err != nil {
 					return err
 				}

@@ -14,12 +14,29 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/jacobcase/dk/internal/auth"
+	"github.com/jacobcase/dk/internal/cache"
 	"github.com/jacobcase/dk/internal/config"
 	"github.com/jacobcase/dk/internal/output"
 )
 
 // loginTimeout bounds how long dk waits for the browser round-trip.
 const loginTimeout = 5 * time.Minute
+
+// dropCachedResponses empties the response cache after the login it was written
+// under has changed.
+//
+// The cache key names the grant, not the token, so entries written for one
+// account are indistinguishable from the next account's. Logging in or out is
+// the only moment that can change, and it is a moment dk controls.
+//
+// The error is deliberately dropped: failing a completed login because the
+// cache would not tidy is the wrong trade, and every entry is still bounded by
+// the TTL.
+func dropCachedResponses() {
+	if dir, err := config.CacheDir(); err == nil {
+		_ = cache.Clear(dir)
+	}
+}
 
 func newAuthCommand(app *App) *cobra.Command {
 	cmd := &cobra.Command{
@@ -133,6 +150,8 @@ one minute after DigiKey issues it, so paste promptly.`,
 			if err != nil {
 				return err
 			}
+			// Whatever is cached was read for whoever was logged in before.
+			dropCachedResponses()
 
 			payload := map[string]any{
 				"status":        "authenticated",
@@ -379,6 +398,10 @@ and other environments.`,
 			} else if err := store.Delete(auth.KindUser, app.Cfg.Environment); err != nil {
 				return err
 			}
+			// Logging out has to take the account-specific pricing with it,
+			// both because it is the account's and because the next login may
+			// be a different one.
+			dropCachedResponses()
 
 			payload := map[string]any{"status": "logged out", "all": all, "environment": app.Cfg.Environment}
 			t := &output.Table{Headers: []string{"FIELD", "VALUE"}}

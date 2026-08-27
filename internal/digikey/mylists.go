@@ -313,6 +313,7 @@ func (c *Client) Lists(ctx context.Context, startIndex, limit int) ([]ListSummar
 		query:       q,
 		requireUser: true,
 		out:         &out,
+		cacheScope:  ScopeLists,
 	})
 	if err != nil {
 		return nil, err
@@ -358,6 +359,7 @@ func (c *Client) GetList(ctx context.Context, listID string) (*ListSummary, erro
 		path:        myListsBasePath + "/lists/" + url.PathEscape(listID),
 		requireUser: true,
 		out:         &out,
+		cacheScope:  ScopeLists,
 	})
 	if err != nil {
 		return nil, err
@@ -378,6 +380,7 @@ func (c *Client) CreateList(ctx context.Context, req CreateListRequest) (string,
 		body:        req,
 		requireUser: true,
 		out:         &id,
+		invalidates: ScopeLists,
 	})
 	if err != nil {
 		return "", err
@@ -394,6 +397,7 @@ func (c *Client) DeleteList(ctx context.Context, listID string) error {
 		method:      "DELETE",
 		path:        myListsBasePath + "/lists/" + url.PathEscape(listID),
 		requireUser: true,
+		invalidates: ScopeLists,
 	})
 }
 
@@ -409,6 +413,7 @@ func (c *Client) RenameList(ctx context.Context, listID, newName string) error {
 		method:      "PUT",
 		path:        myListsBasePath + "/lists/" + url.PathEscape(listID) + "/listName/" + url.PathEscape(newName),
 		requireUser: true,
+		invalidates: ScopeLists,
 	})
 }
 
@@ -423,6 +428,10 @@ func (c *Client) SuggestListName(ctx context.Context, name string) (string, erro
 		path:        myListsBasePath + "/lists/validate/name/" + url.PathEscape(name),
 		requireUser: true,
 		out:         &suggested,
+		// Deliberately uncached despite being a GET. The answer is "is this
+		// name free right now", and --auto-rename acts on it immediately; a
+		// reply from ten minutes ago would hand back a name that has since been
+		// taken, which is the one thing this call exists to prevent.
 	})
 	if err != nil {
 		return "", err
@@ -464,6 +473,7 @@ func (c *Client) ListParts(ctx context.Context, listID string, startIndex, limit
 		query:       listPartsQuery(startIndex, limit, locale),
 		requireUser: true,
 		out:         &out,
+		cacheScope:  ScopeLists,
 	})
 	if err != nil {
 		return nil, err
@@ -563,6 +573,7 @@ func (c *Client) RawListParts(ctx context.Context, listID string, startIndex, li
 		query:       listPartsQuery(startIndex, limit, locale),
 		requireUser: true,
 		out:         &out,
+		cacheScope:  ScopeLists,
 	})
 	if err != nil {
 		return nil, err
@@ -586,6 +597,7 @@ func (c *Client) AddParts(ctx context.Context, listID string, parts []RequestedP
 		body:        parts,
 		requireUser: true,
 		out:         &ids,
+		invalidates: ScopeLists,
 	})
 	if err != nil {
 		return nil, err
@@ -604,6 +616,7 @@ func (c *Client) UpdatePart(ctx context.Context, listID, uniqueID string, part R
 		path:        myListsBasePath + "/lists/" + url.PathEscape(listID) + "/parts/" + url.PathEscape(uniqueID),
 		body:        part,
 		requireUser: true,
+		invalidates: ScopeLists,
 	})
 }
 
@@ -616,6 +629,7 @@ func (c *Client) DeletePart(ctx context.Context, listID, uniqueID string) error 
 		method:      "DELETE",
 		path:        myListsBasePath + "/lists/" + url.PathEscape(listID) + "/parts/" + url.PathEscape(uniqueID),
 		requireUser: true,
+		invalidates: ScopeLists,
 	})
 }
 

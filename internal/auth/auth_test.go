@@ -486,7 +486,7 @@ func TestTokenPrefersUserWhenAvailable(t *testing.T) {
 		Environment: testEnv, Store: store, HTTPClient: ts.Client(), PreferUser: true,
 	}
 
-	got, err := m.Token(context.Background(), false)
+	got, user, err := m.Token(context.Background(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,6 +494,11 @@ func TestTokenPrefersUserWhenAvailable(t *testing.T) {
 	// app token would do.
 	if got != "user-token" {
 		t.Errorf("Token(requireUser=false) = %q, want the cached user token", got)
+	}
+	// And it has to say so: the response cache keys on the grant, and pricing
+	// from a 3-legged token must not be served to a 2-legged read.
+	if !user {
+		t.Error("Token() reported an app grant while returning the user token")
 	}
 	if ts.calls.Load() != 0 {
 		t.Error("token endpoint was called even though a valid user token was cached")
@@ -510,12 +515,15 @@ func TestTokenFallsBackToAppWhenNotLoggedIn(t *testing.T) {
 		Environment: testEnv, Store: newTestStore(t), HTTPClient: ts.Client(), PreferUser: true,
 	}
 
-	got, err := m.Token(context.Background(), false)
+	got, user, err := m.Token(context.Background(), false)
 	if err != nil {
 		t.Fatalf("Token() error = %v", err)
 	}
 	if got != "app-token" {
 		t.Errorf("Token() = %q, want the client-credentials token", got)
+	}
+	if user {
+		t.Error("Token() reported a user grant for a client-credentials token")
 	}
 }
 
@@ -531,7 +539,7 @@ func TestTokenRequireUserDoesNotFallBack(t *testing.T) {
 
 	// MyLists would reject an app token, so requireUser must fail loudly rather
 	// than silently sending one.
-	if _, err := m.Token(context.Background(), true); !errors.Is(err, ErrLoginRequired) {
+	if _, _, err := m.Token(context.Background(), true); !errors.Is(err, ErrLoginRequired) {
 		t.Errorf("Token(requireUser=true) error = %v, want ErrLoginRequired", err)
 	}
 	if ts.calls.Load() != 0 {

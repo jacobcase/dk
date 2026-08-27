@@ -177,6 +177,7 @@ func TestSaveRoundTripAndPermissions(t *testing.T) {
 		RedirectURI:  "https://localhost:9999/cb",
 		AccountID:    "12345",
 		Locale:       Locale{Site: "DE", Language: "de", Currency: "EUR"},
+		CacheTTL:     "30s",
 	}
 	if err := Save(want); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -251,6 +252,12 @@ func TestSet(t *testing.T) {
 		{"locale dotted", "locale.currency", "EUR", false, func(c Config) bool { return c.Locale.Currency == "EUR" }},
 		{"locale short alias", "currency", "GBP", false, func(c Config) bool { return c.Locale.Currency == "GBP" }},
 		{"key is case insensitive", "CLIENT_ID", "x", false, func(c Config) bool { return c.ClientID == "x" }},
+		{"cache ttl", "cache_ttl", "45s", false, func(c Config) bool { return c.CacheTTL == "45s" }},
+		{"cache ttl disabled", "cache_ttl", "0", false, func(c Config) bool { return c.CacheTTL == "0" }},
+		// Rejected at write time so a typo surfaces at `dk config set` rather
+		// than on the next command that happens to need the cache.
+		{"cache ttl unparseable", "cache_ttl", "ten minutes", true, nil},
+		{"cache ttl negative", "cache_ttl", "-5m", true, nil},
 		{"invalid environment", "environment", "staging", true, nil},
 		{"unknown key", "nope", "x", true, nil},
 	}
@@ -368,6 +375,57 @@ func TestDirUsesXDGConfigHome(t *testing.T) {
 
 // The path dk prints must be pasteable into a shell without quoting. The old
 // location, ~/Library/Application Support/dk, was not.
+func TestCacheDirIsNeverTheBareEnvironmentValue(t *testing.T) {
+	// `dk cache clear` deletes what CacheDir() returns, so no branch may return
+	// the variable it was given: returning it as-is would make
+	// `DK_CACHE_DIR=$HOME dk cache clear` a way to lose a home directory. Both
+	// variables are covered, because the guarantee is about what the command
+	// can reach, not about which variable named it.
+	tests := []struct {
+		name string
+		env  string
+	}{
+		{"DK_CACHE_DIR", "DK_CACHE_DIR"},
+		{"DK_CONFIG_DIR", "DK_CONFIG_DIR"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "somewhere")
+			t.Setenv("DK_CACHE_DIR", "")
+			t.Setenv("DK_CONFIG_DIR", "")
+			t.Setenv(tt.env, dir)
+
+			got, err := CacheDir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got == dir {
+				t.Errorf("CacheDir() = %q, the %s value verbatim; want a dk-owned directory under it", got, tt.env)
+			}
+			if filepath.Dir(got) != dir {
+				t.Errorf("CacheDir() = %q, want a single dk-owned element directly under %s (%q)", got, tt.env, dir)
+			}
+		})
+	}
+}
+
+func TestCacheDirStaysInsideTheConfigDir(t *testing.T) {
+	// DK_CONFIG_DIR is dk's isolation lever: the tests and throwaway sandboxes
+	// point it at a temp dir to contain dk's whole on-disk footprint, and a
+	// cache that escaped it would read and pollute the real user cache.
+	dir := t.TempDir()
+	t.Setenv("DK_CACHE_DIR", "")
+	t.Setenv("DK_CONFIG_DIR", dir)
+
+	got, err := CacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(got, dir) {
+		t.Errorf("CacheDir() = %q, want it under DK_CONFIG_DIR %q", got, dir)
+	}
+}
+
 func TestDirHasNoSpaces(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows paths routinely contain spaces")

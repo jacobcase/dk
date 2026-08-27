@@ -394,10 +394,11 @@ type CategoriesResponse struct {
 func (c *Client) KeywordSearch(ctx context.Context, req KeywordRequest) (*KeywordResponse, error) {
 	var out KeywordResponse
 	err := c.do(ctx, request{
-		method: "POST",
-		path:   productsBasePath + "/search/keyword",
-		body:   req,
-		out:    &out,
+		method:     "POST",
+		path:       productsBasePath + "/search/keyword",
+		body:       req,
+		out:        &out,
+		cacheScope: ScopeProduct,
 	})
 	if err != nil {
 		return nil, err
@@ -415,10 +416,11 @@ func (c *Client) KeywordSearch(ctx context.Context, req KeywordRequest) (*Keywor
 func (c *Client) RawKeywordSearch(ctx context.Context, req KeywordRequest) (json.RawMessage, error) {
 	var out json.RawMessage
 	err := c.do(ctx, request{
-		method: "POST",
-		path:   productsBasePath + "/search/keyword",
-		body:   req,
-		out:    &out,
+		method:     "POST",
+		path:       productsBasePath + "/search/keyword",
+		body:       req,
+		out:        &out,
+		cacheScope: ScopeProduct,
 	})
 	if err != nil {
 		return nil, err
@@ -451,9 +453,10 @@ func (c *Client) RawProductResponse(ctx context.Context, partNumber, endpoint st
 
 	var out json.RawMessage
 	err := c.do(ctx, request{
-		method: "GET",
-		path:   productsBasePath + "/search/" + url.PathEscape(partNumber) + "/" + endpoint,
-		out:    &out,
+		method:     "GET",
+		path:       productsBasePath + "/search/" + url.PathEscape(partNumber) + "/" + endpoint,
+		out:        &out,
+		cacheScope: ScopeProduct,
 	})
 	if err != nil {
 		return nil, err
@@ -468,9 +471,10 @@ func (c *Client) ProductDetails(ctx context.Context, partNumber string) (*Produc
 	}
 	var out ProductDetails
 	err := c.do(ctx, request{
-		method: "GET",
-		path:   productsBasePath + "/search/" + url.PathEscape(partNumber) + "/productdetails",
-		out:    &out,
+		method:     "GET",
+		path:       productsBasePath + "/search/" + url.PathEscape(partNumber) + "/productdetails",
+		out:        &out,
+		cacheScope: ScopeProduct,
 	})
 	if err != nil {
 		return nil, err
@@ -506,9 +510,10 @@ func (c *Client) Substitutions(ctx context.Context, partNumber string) (*Product
 	}
 	var out ProductSubstitutesResponse
 	err := c.do(ctx, request{
-		method: "GET",
-		path:   productsBasePath + "/search/" + url.PathEscape(partNumber) + "/substitutions",
-		out:    &out,
+		method:     "GET",
+		path:       productsBasePath + "/search/" + url.PathEscape(partNumber) + "/substitutions",
+		out:        &out,
+		cacheScope: ScopeProduct,
 	})
 	if err != nil {
 		return nil, err
@@ -558,9 +563,10 @@ func (c *Client) Associations(ctx context.Context, partNumber string) (*ProductA
 	}
 	var out ProductAssociationsResponse
 	err := c.do(ctx, request{
-		method: "GET",
-		path:   productsBasePath + "/search/" + url.PathEscape(partNumber) + "/associations",
-		out:    &out,
+		method:     "GET",
+		path:       productsBasePath + "/search/" + url.PathEscape(partNumber) + "/associations",
+		out:        &out,
+		cacheScope: ScopeProduct,
 	})
 	if err != nil {
 		return nil, err
@@ -600,9 +606,10 @@ func (c *Client) RecommendedProducts(ctx context.Context, partNumber string) ([]
 	}
 	var out RecommendedProductsResponse
 	err := c.do(ctx, request{
-		method: "GET",
-		path:   productsBasePath + "/search/" + url.PathEscape(partNumber) + "/recommendedproducts",
-		out:    &out,
+		method:     "GET",
+		path:       productsBasePath + "/search/" + url.PathEscape(partNumber) + "/recommendedproducts",
+		out:        &out,
+		cacheScope: ScopeProduct,
 	})
 	if err != nil {
 		return nil, err
@@ -628,9 +635,10 @@ func (c *Client) AlternatePackaging(ctx context.Context, partNumber string) ([]P
 	}
 	var out AlternatePackagingResponse
 	err := c.do(ctx, request{
-		method: "GET",
-		path:   productsBasePath + "/search/" + url.PathEscape(partNumber) + "/alternatepackaging",
-		out:    &out,
+		method:     "GET",
+		path:       productsBasePath + "/search/" + url.PathEscape(partNumber) + "/alternatepackaging",
+		out:        &out,
+		cacheScope: ScopeProduct,
 	})
 	if err != nil {
 		return nil, err
@@ -705,10 +713,11 @@ func (c *Client) PackageTypeByQuantity(ctx context.Context, partNumber string, r
 
 	var out PackageTypeByQuantityResponse
 	err := c.do(ctx, request{
-		method: "GET",
-		path:   productsBasePath + "/search/packagetypebyquantity/" + url.PathEscape(partNumber),
-		query:  q,
-		out:    &out,
+		method:     "GET",
+		path:       productsBasePath + "/search/packagetypebyquantity/" + url.PathEscape(partNumber),
+		query:      q,
+		out:        &out,
+		cacheScope: ScopeProduct,
 	})
 	if err != nil {
 		return nil, err
@@ -744,9 +753,10 @@ func (c *Client) Media(ctx context.Context, partNumber string) ([]MediaLink, err
 	}
 	var out MediaResponse
 	err := c.do(ctx, request{
-		method: "GET",
-		path:   productsBasePath + "/search/" + url.PathEscape(partNumber) + "/media",
-		out:    &out,
+		method:     "GET",
+		path:       productsBasePath + "/search/" + url.PathEscape(partNumber) + "/media",
+		out:        &out,
+		cacheScope: ScopeProduct,
 	})
 	if err != nil {
 		return nil, err
@@ -759,9 +769,10 @@ func (c *Client) Media(ctx context.Context, partNumber string) ([]MediaLink, err
 func (c *Client) Manufacturers(ctx context.Context) ([]NamedID, error) {
 	var out ManufacturersResponse
 	err := c.do(ctx, request{
-		method: "GET",
-		path:   productsBasePath + "/search/manufacturers",
-		out:    &out,
+		method:     "GET",
+		path:       productsBasePath + "/search/manufacturers",
+		out:        &out,
+		cacheScope: ScopeProduct,
 	})
 	if err != nil {
 		return nil, err
@@ -774,9 +785,10 @@ func (c *Client) Manufacturers(ctx context.Context) ([]NamedID, error) {
 func (c *Client) Categories(ctx context.Context) ([]CategoryNode, error) {
 	var out CategoriesResponse
 	err := c.do(ctx, request{
-		method: "GET",
-		path:   productsBasePath + "/search/categories",
-		out:    &out,
+		method:     "GET",
+		path:       productsBasePath + "/search/categories",
+		out:        &out,
+		cacheScope: ScopeProduct,
 	})
 	if err != nil {
 		return nil, err
@@ -790,9 +802,10 @@ func (c *Client) Category(ctx context.Context, categoryID int) (*CategoryNode, e
 		Category CategoryNode `json:"Category"`
 	}
 	err := c.do(ctx, request{
-		method: "GET",
-		path:   fmt.Sprintf("%s/search/categories/%d", productsBasePath, categoryID),
-		out:    &out,
+		method:     "GET",
+		path:       fmt.Sprintf("%s/search/categories/%d", productsBasePath, categoryID),
+		out:        &out,
+		cacheScope: ScopeProduct,
 	})
 	if err != nil {
 		return nil, err

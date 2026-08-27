@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"github.com/jacobcase/dk/internal/config"
 )
 
 // guideText is a condensed operating manual aimed at programs driving dk.
@@ -28,6 +30,27 @@ OUTPUT CONTRACT
   if you want certainty.
 
   Progress notes and prompts go to stderr, never stdout.
+
+RESPONSE CACHE
+  Successful catalog and list reads are cached on disk (default ` + config.DefaultCacheTTL + `) and
+  an identical read is served from there without touching the API. Re-running a
+  query to reshape, filter, or pipe its output is therefore free: run it again
+  rather than contriving a way to avoid a second call.
+
+  Only reads are cached, and only successful ones — a rate-limit or an expired
+  token is never stored. Writing to a list drops the cached list reads at once,
+  so "dk list show" always reflects a "dk list add" that just ran. The read a
+  write depends on is never cached either: "dk list rm" and "dk list set"
+  resolve part numbers against live contents, and the part count behind
+  "dk list delete"'s --force guard is always asked of the API.
+
+    --no-cache        ask DigiKey even when a fresh entry exists, and replace it
+    --cache-ttl 0     switch the cache off for one invocation
+    dk cache status   where the entries live and how many are held
+    dk cache clear    delete all of them
+
+  Stock and price move, and an entry may be up to the TTL old. Pass --no-cache
+  before quoting a figure a human is about to act on.
 
 EXIT CODES
   0  success
@@ -284,12 +307,17 @@ RECOMMENDED AGENT WORKFLOW
        dk search "<part description>" --param "<name>=<value>" --in-stock
   3. Pick a part; confirm what buying your quantity really means:
        dk pricing <dkpn> --qty <n> --output json   check .best and .forced_up
+     Add --no-cache before reporting a price or a stock figure to a human:
+     .best names the cheapest option in stock as of the cached reply, which
+     may be up to the cache TTL old.
   4. For connectors and terminals, check what else is needed:
        dk related <dkpn> --output json             mating half, crimper, kit
   5. dk list create "<project name>"               once per project
   6. dk list add "<project>" <dkpn>:<qty> --ref <designators> --verify
      Correcting a quantity later: dk list set "<project>" <dkpn> --qty <n>
   7. dk list show "<project>" --output json        verify matched and totals
+     estimated_total is priced from that same window; pass --no-cache before
+     handing a total to a human.
   8. Report the list URL to the human for review and ordering.
 
 NOTES
