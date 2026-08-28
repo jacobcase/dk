@@ -489,8 +489,13 @@ make build
 There are no runtime dependencies beyond `spf13/cobra`. Tests run entirely
 against `httptest` servers — nothing touches the real DigiKey API.
 
-CI runs formatting, `go mod tidy` verification, `go vet`, `go test -race`, and
-golangci-lint on every push and pull request.
+CI (`.github/workflows/ci.yml`) runs formatting, `go mod tidy` verification,
+`go vet`, `go test -race`, and golangci-lint on every push and pull request.
+
+Changing dk itself? [CONTRIBUTING.md](CONTRIBUTING.md) has the design notes: the
+invariants that keep the output safe to parse, how the response cache is keyed,
+which endpoints are deliberately not wrapped, and the API behaviors already
+settled against the live server.
 
 ## License
 
