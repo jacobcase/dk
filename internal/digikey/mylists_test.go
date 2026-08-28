@@ -441,30 +441,6 @@ func TestDeletePartPath(t *testing.T) {
 	}
 }
 
-func TestGetListDecodesRequestedParts(t *testing.T) {
-	// A decode test, not a statement about the live API: PartsList is populated
-	// here so the tags round-trip, and comes back empty from every real
-	// response. Nothing in dk looks a part up through GetList — see its doc.
-	body := `{"Id":"aaa-111","ListName":"Bench PSU rev A","TotalParts":1,
-	  "Tags":["project"],
-	  "PartsList":[{"UniqueId":"uid-1","RequestedPartNumber":"490-1532-1-ND",
-	                "Quantities":[{"Quantity":10}]}]}`
-	rc := newRoutedClient(t, map[string]route{
-		"GET /mylists/v1/lists/aaa-111": {http.StatusOK, body},
-	})
-
-	got, err := rc.GetList(context.Background(), "aaa-111")
-	if err != nil {
-		t.Fatalf("GetList() error = %v", err)
-	}
-	if got.ListName != "Bench PSU rev A" || len(got.PartsList) != 1 {
-		t.Errorf("GetList() = %+v, want one part on the named list", got)
-	}
-	if got.PartsList[0].Quantities[0].Quantity != 10 {
-		t.Errorf("Quantity = %d, want 10", got.PartsList[0].Quantities[0].Quantity)
-	}
-}
-
 func TestAllListsPagesUntilShortPage(t *testing.T) {
 	// Resolving a list by name needs every list. A list on page two must not
 	// be indistinguishable from one that does not exist.
@@ -569,11 +545,11 @@ func TestSuggestListNameDecodesBareString(t *testing.T) {
 
 func TestMyListsErrorSurfacesRequestID(t *testing.T) {
 	rc := newRoutedClient(t, map[string]route{
-		"GET /mylists/v1/lists/missing": {http.StatusNotFound,
+		"GET /mylists/v1/lists/missing/parts": {http.StatusNotFound,
 			`{"StatusCode":404,"ErrorMessage":"List not found","RequestId":"req-9"}`},
 	})
 
-	_, err := rc.GetList(context.Background(), "missing")
+	_, err := rc.ListParts(context.Background(), "missing", 0, 10, Locale{})
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("error type = %T, want *APIError", err)

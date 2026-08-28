@@ -91,6 +91,33 @@ type ProductStatus struct {
 	Status string `json:"Status"`
 }
 
+// Product status ids. The spec's ProductStatusV4 documents an Id and a Status
+// string and no values for either, so these are the ones seen live. Match on
+// the id: Status is display text and localizes, exactly like PackageType.Name.
+//
+// Not exhaustive — DigiKey has statuses these three do not cover ("Not For New
+// Designs", "Last Time Buy") whose ids are unknown. Retired() therefore names
+// what is known to be retired rather than assuming everything else is active,
+// so an unseen id keeps its old behavior instead of being guessed at.
+const (
+	StatusActive       = 0
+	StatusObsolete     = 1
+	StatusDiscontinued = 2 // "Discontinued at DigiKey"
+)
+
+// Retired reports whether DigiKey has stopped selling this product, so the only
+// units available are the ones already on the shelf.
+//
+// This reads the status id because the two booleans that describe the same
+// thing are inert. `Discontinued` is documented as "no longer sold at Digi-Key
+// and will no longer be stocked" — the definition of status 2 — and comes back
+// false on parts DigiKey itself labels "Discontinued at DigiKey"; `EndOfLife`
+// likewise. Tested 2026-08-28 across active, obsolete and discontinued parts:
+// both were false every time. See CONTRIBUTING.md.
+func (s ProductStatus) Retired() bool {
+	return s.ID == StatusObsolete || s.ID == StatusDiscontinued
+}
+
 // PriceBreak is one tier of quantity pricing.
 type PriceBreak struct {
 	BreakQuantity int     `json:"BreakQuantity"`
@@ -693,11 +720,14 @@ type PricingOptionProduct struct {
 // PricingOption (the field) is DigiKey's own classification, and it is the
 // reason this endpoint is worth more than a price: "Exact" buys what was asked
 // for, "MinimumOrderQuantity" is the quantity forced up by a minimum,
-// "BetterValue" costs less than the exact option while buying more, and
-// "MaxOrderQuantity" is capped *below* it — DigiKey lowering the request to the
-// most it will sell, which is a shortfall, not a surplus. Nothing derived
-// locally can produce BetterValue — it is a comparison across the whole option
-// set.
+// "BetterValue" buys more at a lower price per piece, and "MaxOrderQuantity"
+// is capped *below* it — DigiKey lowering the request to the most it will sell,
+// which is a shortfall, not a surplus. Nothing derived locally can produce
+// BetterValue — it is a comparison across the whole option set.
+//
+// BetterValue describes the unit price and not the total: live, the same part
+// answers it both cheaper and $12.52 dearer than Exact depending on the
+// quantity asked for. Rank on TotalPrice, never on this field.
 type PricingOption struct {
 	PricingOption       string                 `json:"PricingOption"`
 	TotalQuantityPriced int                    `json:"TotalQuantityPriced"`
@@ -782,6 +812,39 @@ func (c *Client) PricingByQuantity(ctx context.Context, partNumber string, reque
 		return nil, err
 	}
 	return &out, nil
+}
+
+// RawPricingByQuantity returns the pricingbyquantity body verbatim, for the
+// same reason as RawKeywordSearch: `dk pricing` flattens an option's products
+// into a view, and re-encoding that view would drop every field the structs do
+// not model. It shares the typed path's cache entry, since the cache stores
+// response bytes.
+func (c *Client) RawPricingByQuantity(ctx context.Context, partNumber string, requestedQuantity, manufacturerID int) (json.RawMessage, error) {
+	if strings.TrimSpace(partNumber) == "" {
+		return nil, errors.New("product number is required")
+	}
+	if requestedQuantity < 1 {
+		return nil, errors.New("requested quantity must be at least 1")
+	}
+
+	q := url.Values{}
+	if manufacturerID > 0 {
+		q.Set("manufacturerId", strconv.Itoa(manufacturerID))
+	}
+
+	var out json.RawMessage
+	err := c.do(ctx, request{
+		method: "GET",
+		path: productsBasePath + "/search/" + url.PathEscape(partNumber) +
+			"/pricingbyquantity/" + strconv.Itoa(requestedQuantity),
+		query:      q,
+		out:        &out,
+		cacheScope: ScopeProduct,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // MediaLink is one document or asset attached to a product: a datasheet, a

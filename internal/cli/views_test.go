@@ -77,13 +77,46 @@ func TestProductViewOrderable(t *testing.T) {
 			digikey.Product{QuantityAvailable: 0, BackOrderNotAllowed: true},
 			false,
 		},
-		{"discontinued", digikey.Product{QuantityAvailable: 10, Discontinued: true}, false},
-		{"end of life", digikey.Product{QuantityAvailable: 10, EndOfLife: true}, false},
+
+		// Stock outranks lifecycle status. WK-KIT-ND is live proof: DigiKey
+		// labels it "Discontinued at DigiKey", holds 172, and sells them at
+		// $8.88. Reporting that unorderable would hide a part a human can buy.
+		{
+			"retired but still stocked is orderable",
+			digikey.Product{QuantityAvailable: 172, ProductStatus: digikey.ProductStatus{ID: digikey.StatusDiscontinued, Status: "Discontinued at DigiKey"}},
+			true,
+		},
+		{"discontinued flag does not veto stock", digikey.Product{QuantityAvailable: 10, Discontinued: true}, true},
+		{"end of life flag does not veto stock", digikey.Product{QuantityAvailable: 10, EndOfLife: true}, true},
+
+		// The regression this pair exists for: with no stock, a retired part is
+		// not orderable even though DigiKey leaves Discontinued/EndOfLife false
+		// and BackOrderNotAllowed false. 490-1532-1-ND is exactly this shape and
+		// used to report orderable=true, while its pricing endpoint 500s and it
+		// carries no pack option in a list.
+		{
+			"obsolete and out of stock is not orderable",
+			digikey.Product{QuantityAvailable: 0, BackOrderNotAllowed: false, ProductStatus: digikey.ProductStatus{ID: digikey.StatusObsolete, Status: "Obsolete"}},
+			false,
+		},
+		{
+			"discontinued and out of stock is not orderable",
+			digikey.Product{QuantityAvailable: 0, BackOrderNotAllowed: false, ProductStatus: digikey.ProductStatus{ID: digikey.StatusDiscontinued, Status: "Discontinued at DigiKey"}},
+			false,
+		},
+
+		// An id these constants do not name keeps the old behavior rather than
+		// being assumed retired: DigiKey has statuses whose ids are unknown.
+		{
+			"unknown status out of stock still backorders",
+			digikey.Product{QuantityAvailable: 0, BackOrderNotAllowed: false, ProductStatus: digikey.ProductStatus{ID: 7, Status: "Not For New Designs"}},
+			true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := newProductView(tt.p, "USD").Orderable; got != tt.want {
-				t.Errorf("orderable = %v, want %v", got, tt.want)
+				t.Errorf("orderable = %v, want %v — an agent reads this field to decide whether to recommend the part", got, tt.want)
 			}
 		})
 	}

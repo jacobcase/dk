@@ -209,9 +209,9 @@ The rules that keep it from being worse than no cache at all:
 config directory: that variable is dk's isolation lever, and a cache that
 escaped it would let one test read another's responses and pollute the real
 user cache. `DK_CACHE_DIR` is checked *first*, so `internal/cli`'s `TestMain`
-clears it (along with `DK_CACHE_TTL`) before anything runs — a developer with it
-exported would otherwise have the suite write to, and `cache clear`, their real
-cache. Tests share a config dir across invocations on purpose — the cache only
+clears it (along with `DK_CACHE_TTL` and `DK_CONFIG_DIR`) before anything runs —
+a developer with any of them exported would otherwise have the suite write to,
+and `cache clear`, their real cache. Tests share a config dir across invocations on purpose — the cache only
 pays off between processes, so a per-run temp dir would test nothing.
 
 No branch of `CacheDir()` returns the variable it was handed: each ends in a
@@ -248,6 +248,20 @@ DigiKey only honors `ParameterFilterRequest` alongside a `CategoryFilter`, and
 parameter ids are category-scoped. `resolveParamSpecs` derives that category from
 the parameters themselves and rejects specs that span two categories, since the
 API cannot express it.
+
+**`FilterOptions.ParametricFilters` comes back empty unless the search lands in
+one leaf category**, which is stricter than it sounds and is the usual reason
+`--param` exits 2. Tested 2026-08-28: `0.1uF 0603 X7R 50V` (352 matches)
+returns 16 parameters, while `0603 ceramic capacitor` (109,344) and `ring
+terminal heat shrink` (553) return none — so it tracks neither result size nor
+how category-shaped the phrase reads. `Manufacturers` facets still come back in
+every one of those cases, which is what makes the empty parameter set look like
+a bug rather than an answer. A parent `--category` does not rescue it either
+(`2031` Terminals: still none); a leaf does (`60` Ceramic Capacitors: 16).
+Page size is not a factor — identical facets at `Limit` 1, 5, 25 and 50 —
+which is the probe that keeps `discoveryLimit = 1` honest. Nothing here is
+dk's to fix: the two-step loop in `dk guide` therefore leads with a keyword
+specific enough to resolve, and names the leaf-category escape hatch.
 
 ## Documents
 
@@ -305,6 +319,31 @@ that they get written down rather than rediscovered.
   buy, which is the zero-total-that-looks-like-a-bargain failure in the
   direction that costs money. Price from `PackOptions`; a line without them is
   `unpriced`, which is what the flag would otherwise be standing in for.
+
+- **`Product.Discontinued` and `Product.EndOfLife` are never set; the status id
+  is the only live lifecycle signal.** The spec documents `Discontinued` as
+  "no longer sold at Digi-Key and will no longer be stocked" — a definition of
+  `ProductStatus` id 2 — and it comes back `false` on parts DigiKey itself
+  labels "Discontinued at DigiKey". Same for `EndOfLife`. Tested 2026-08-28
+  across Active (id 0), Obsolete (id 1) and Discontinued (id 2) parts: both
+  false every time. `ProductStatus.Retired()` reads the id instead, and matches
+  on the id rather than `Status` because that string is display text and
+  localizes exactly like `PackageType.Name`.
+
+  This is not cosmetic. `orderable` was `!Discontinued && !EndOfLife &&
+  (inStock || !BackOrderNotAllowed)`, and with the first two always false it
+  reduced to
+  `inStock || !BackOrderNotAllowed` — so `490-1532-1-ND`, Obsolete with zero
+  stock and a pricing endpoint that answers 500, reported `orderable: true`.
+  The rule now is that **stock outranks status, and status only speaks when
+  there is no stock**: `inStock || (!retired && !BackOrderNotAllowed)`. A
+  discontinued part with units left is orderable — `WK-KIT-ND` is
+  "Discontinued at DigiKey" with 172 on the shelf at $8.88 — and a retired part
+  with none is not, whatever the two booleans claim. `Retired()` names only the
+  ids seen live rather than treating everything that is not id 0 as retired:
+  DigiKey has statuses ("Not For New Designs", "Last Time Buy") whose ids are
+  undocumented and unobserved, and an unknown id keeps its old behavior instead
+  of being guessed at.
 
 - **`KeywordResponse.AppliedParametricFiltersDto` is always empty.** It reads
   like the echo that would tell a caller whether DigiKey honored a
@@ -377,6 +416,12 @@ Five more, tested 2026-08-28 against the live API.
   `ListPart`, so an edit converts with `ListPart.RequestedPart()`. The unit
   tests did not catch this because their fixture filled the array in.
 
+  Re-confirmed 2026-08-28 on production and sandbox, against a 1-part and a
+  17-part list on each: `TotalParts` right, `PartsList` empty, every time. The
+  client method that wrapped it is gone — nothing called it, and this is why
+  nothing could. `ListSummary.PartsList` stays decoded because the spec
+  documents it, and stays empty because DigiKey never fills it.
+
 - **`PackageType.Name` is localized; `PackageType.Id` is not.** A JP-site
   response calls id 2 "カット テープ（CT）" and id 1 "テープ＆リール（TR）", while
   the ids are 1/2/243 on every locale. `--packaging` matched the English name
@@ -434,10 +479,23 @@ half `dk pricing` exists for:
   carries no part number or unit price of its own — the same rule as pairing a
   part number with its price, one level up.
 - **`PricingOption` is DigiKey's own classification**: `Exact`,
-  `MinimumOrderQuantity`, `BetterValue`, `MaxOrderQuantity`. `BetterValue` —
-  cheaper to buy *more* — cannot be derived from a single option, and dk could
-  not express it at all before. Live: 4500 on cut tape is $29.75, while 5000 on
-  a reel is $23.45.
+  `MinimumOrderQuantity`, `BetterValue`, `MaxOrderQuantity`. `BetterValue`
+  cannot be derived from a single option — it is a comparison across the set —
+  and dk could not express it at all before. Live: 4500 on cut tape is $29.75,
+  while 5000 on a reel is $23.45.
+
+  **`BetterValue` is a better *unit* price, not a smaller bill.** Tested
+  2026-08-28 across three parts, it went both ways, and the wording that used
+  to stand here ("cheaper to buy *more*") was true of only half of them.
+  `478-KGM15BR71H104KTTR-ND` at 11000 answers `BetterValue` 12000 for $146.16
+  against `Exact` 11000 for $174.04 — cheaper outright. The same part at 9000
+  answers `BetterValue` 12000 for the same $146.16 against `Exact` 9000 for
+  $133.64, which is $12.52 *more*; at 6000 the gap is $16.32. The per-piece
+  rate improves every time, and that is all the label promises. This is why
+  `cheapestInStock` ranks on `TotalPrice` and never on the classification, and
+  why `dk guide` tells a caller to compare totals rather than relay the label —
+  an agent that reads `BetterValue` as "cheaper" reports a saving on a line
+  that costs 17% more.
 - **The arithmetic is DigiKey's, not dk's.** The old path picked
   `RecommendedQuantity`, walked the break table for a unit price, and
   multiplied. `TotalPrice` and per-product `ExtendedPrice` now come priced.
@@ -460,11 +518,26 @@ so its absence is normal and `Options()` falls back to
 answers `500 NullReferenceException` where the old endpoint answered `400` with
 a readable message — the failure is not new, but it is worse-shaped.
 
-MyLists v1 is covered at both layers except `GetPartByUniqueId` and
-`validate/{name}`: the first is subsumed by `GetPartsByListId` (which `dk list
-show` already calls), and the second by `validate/name/{name}`, which `--auto-rename`
-uses and which answers the same question plus a suggestion. Neither had a caller,
-and an unreachable client method is not "coverage".
+MyLists v1 has twelve operations and dk reaches nine of them. The three it does
+not are each deliberate, and none is wrapped at the client layer either — an
+unreachable client method is not "coverage", so a method with no command is a
+method to delete:
+
+- **`GetPartFromListByUniqueId`** is subsumed by `GetPartsByListId`, which
+  `dk list show` already calls.
+- **`GetListByListId`** cannot do the one thing its shape advertises: it
+  answers with a correct `TotalParts` beside an empty `PartsList`, always (see
+  "Settled against the live API"). Metadata already comes from `Lists` via
+  `ResolveList` and contents from `AllListParts`, so wrapping it could only
+  offer a caller a worse answer. It *was* wrapped, as `Client.GetList`, with no
+  caller outside its own tests; it was removed once the audit below established
+  that no caller could ever want it.
+- **`IsValidListName`** (`validate/{listName}`) is a bare availability check —
+  `true` or `false`, no suggestion — and `--auto-rename` needs a free *name*,
+  not a verdict. Deriving one from `AllLists` answers both halves in one call,
+  and that walk has to happen anyway whenever the verdict is `false`. Note this
+  is *not* the reason that used to stand here, which was that
+  `validate/name/{name}` subsumed it; that route does not exist on the server.
 
 **`validate/name/{name}` is in the spec but not on the server.** Against the
 live API it answers `404 Invalid resource path`, which used to fail
@@ -473,6 +546,18 @@ route does not exist" and derives a free name from `AllLists` instead. Only a
 404: a 401 or a 429 says nothing about whether the name is taken, and a name
 invented from a listing dk could not read would be a guess. If DigiKey ever
 ships the route, the fallback stops being reached on its own.
+
+**The other spelling, `validate/{listName}`, is the one that works.** Re-tested
+2026-08-28 against both hosts: `validate/name/{name}` answers 404 for every
+name, free or taken, with no space in it to blame the encoding, while
+`validate/{listName}` answers `200 true` for a free name and `200 false` for a
+taken one. So the two routes are the reverse of what the spec's shape suggests,
+and the fallback above is not an edge case — it is the only path `--auto-rename`
+has ever taken against the live API. It is still the right one: a `false` says
+a name is taken without saying what is free, so the `AllLists` walk would have
+to follow anyway, and going straight to it costs one request rather than two.
+Do not "fix" `SuggestListName` by pointing it at the working route without
+reading that sentence first.
 
 `ProductSummary` (associations, alternate packaging) returns `UnitPrice` as a
 preformatted **string**; `Product` and `RecommendedProduct` return it as a
@@ -531,7 +616,8 @@ locally before changing any wire type. Two known inconsistencies are handled exp
   `ChildCategories` inside a `Product` — `CategoryNode.Children()` covers both.
 
 Both APIs name this header `X-DIGIKEY-Account-Id` — Product Information v4
-declares it on 5 paths, MyLists v1 on 6, and neither spec mentions
+declares it on 5 operations, MyLists v1 on 6 (across 4 paths, two of which
+declare it on both of their methods), and neither spec mentions
 `X-DIGIKEY-Customer-Id` at all. The client sends both from one config value;
 Customer-Id is a v3-era carryover kept only because DigiKey ignores unknown
 headers, not because v4 wants it. Product Information's parameter description
@@ -547,7 +633,8 @@ assumed, so prefer it when changing list pricing:
   `SelectedPackOptionIndex`. `SelectedPackOption` therefore tries the index
   first and treats the name as a fallback. Matching on the name alone would
   never fire against real data — and could not work anyway: MyLists spells pack
-  types as short codes (`CT`, `DKR`, `TR`) while Product Information uses
+  types as short codes (`CT`, `DKR`, `TR`, and `BAG` for a part that ships in
+  one, seen live on `WK-KIT-ND`) while Product Information uses
   `Cut Tape (CT)`, `Digi-Reel®`, `Tape & Reel (TR)`. The two vocabularies do
   not overlap. See `testdata/listparts_priced.json`.
 - **`PackOptions` was an empty array** for an Obsolete, zero-stock part. There

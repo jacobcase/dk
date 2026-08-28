@@ -30,8 +30,10 @@ type ProductView struct {
 	Status                 string  `json:"status,omitempty"`
 	Category               string  `json:"category,omitempty"`
 	Series                 string  `json:"series,omitempty"`
-	// Orderable is false for parts that cannot be bought as-is: no stock and no
-	// backorder, discontinued, or end of life.
+	// Orderable is true when the part can be bought as-is: stock exists, or
+	// DigiKey will backorder it. Stock wins over lifecycle status — a
+	// discontinued part is orderable while units remain — so this is not a
+	// restatement of Status.
 	Orderable    bool   `json:"orderable"`
 	Discontinued bool   `json:"discontinued,omitempty"`
 	EndOfLife    bool   `json:"end_of_life,omitempty"`
@@ -180,10 +182,22 @@ func newProductView(p digikey.Product, currency string) ProductView {
 		v.MinimumOrderQuantity = p.MinimumOrderQuantity
 	}
 
-	// A part is orderable if stock exists, or if DigiKey will accept a backorder
-	// and the part has not been retired.
+	// Stock decides it, and only when there is none does anything else get a
+	// say. A discontinued part with units on the shelf is orderable — WK-KIT-ND
+	// is "Discontinued at DigiKey" with 172 in stock and DigiKey prices it at
+	// $8.88 — so retirement must not veto stock. With no stock the question is
+	// whether DigiKey will backorder, and it will not for a part it has stopped
+	// selling.
+	//
+	// Retired() rather than p.Discontinued/p.EndOfLife: those two are the fields
+	// that would say this and DigiKey never sets them (see their doc). Reading
+	// them alone reported an Obsolete, zero-stock part as orderable, because
+	// both were false and BackOrderNotAllowed happened to be false too — a part
+	// whose pricing endpoint 500s and which carries no pack option in a list.
+	// They stay in the expression because a true from either is still true.
 	inStock := p.QuantityAvailable > 0
-	v.Orderable = !p.Discontinued && !p.EndOfLife && (inStock || !p.BackOrderNotAllowed)
+	retired := p.Discontinued || p.EndOfLife || p.ProductStatus.Retired()
+	v.Orderable = inStock || (!retired && !p.BackOrderNotAllowed)
 	return v
 }
 

@@ -90,6 +90,7 @@ func newPricingCommand(app *App) *cobra.Command {
 	var (
 		quantity   int
 		preference string
+		raw        bool
 	)
 
 	cmd := &cobra.Command{
@@ -102,9 +103,11 @@ func newPricingCommand(app *App) *cobra.Command {
 
 DigiKey returns every way it will sell the requested quantity, and labels each
 one: EXACT buys what was asked for, MINIMUMORDERQUANTITY is the quantity a
-minimum forces you up to, and BETTERVALUE costs less than the exact option
-while buying more — a 5000-piece reel that is cheaper than 4500 on cut tape.
-A "*" marks any option that hands you more than you asked for.
+minimum forces you up to, and BETTERVALUE buys more at a lower price per piece.
+BETTERVALUE is DigiKey's label, and it describes the unit price, not the bill:
+sometimes the larger quantity is cheaper outright — 5000 on a reel for less
+than 4500 on cut tape — and sometimes it simply costs more. Compare TOTAL, not
+the label. A "*" marks any option that hands you more than you asked for.
 
 An option can name more than one part number: a quantity past a standard reel
 is filled with the reel plus a cut-tape remainder, priced as one option. Each
@@ -119,6 +122,9 @@ DigiKey returns any.`,
 			partNumber := strings.TrimSpace(args[0])
 			if partNumber == "" {
 				return usageErrorf("part number must not be empty")
+			}
+			if err := app.checkRawFormat(raw); err != nil {
+				return err
 			}
 			if quantity < 1 {
 				return usageErrorf("--qty must be at least 1")
@@ -137,12 +143,30 @@ DigiKey returns any.`,
 				if _, ok := packagingIDs[preference]; !ok {
 					return usageErrorf("--packaging must be CT (cut tape), TR (tape & reel), or DKR (Digi-Reel), got %q", preference)
 				}
+				// --raw is DigiKey's bytes untouched, and --packaging is dk
+				// discarding some of them. Silently ignoring the filter would
+				// hand back more options than were asked for; applying it would
+				// make --raw a filtered view. Neither is what either flag says.
+				if raw {
+					return usageErrorf("--packaging filters dk's view and cannot be combined with --raw, which emits DigiKey's unmodified response")
+				}
 			}
 
 			client, err := app.Client()
 			if err != nil {
 				return err
 			}
+			// Fetched through the raw path rather than re-encoding the view:
+			// the flattening here drops whatever these structs do not model,
+			// which is exactly what --raw exists to avoid.
+			if raw {
+				payload, err := client.RawPricingByQuantity(cmd.Context(), partNumber, quantity, 0)
+				if err != nil {
+					return err
+				}
+				return app.printRaw(payload)
+			}
+
 			resp, err := client.PricingByQuantity(cmd.Context(), partNumber, quantity, 0)
 			if err != nil {
 				return err
@@ -281,7 +305,8 @@ DigiKey returns any.`,
 
 	f := cmd.Flags()
 	f.IntVarP(&quantity, "qty", "n", 1, "quantity you want to end up with")
-	f.StringVar(&preference, "packaging", "", "show only options in this packaging: CT (cut tape) or DKR (Digi-Reel)")
+	f.StringVar(&preference, "packaging", "", "show only options in this packaging: CT (cut tape), TR (tape & reel), or DKR (Digi-Reel)")
+	f.BoolVar(&raw, "raw", false, "emit DigiKey's unmodified response (implies --output json)")
 
 	return cmd
 }

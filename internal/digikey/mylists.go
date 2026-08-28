@@ -105,8 +105,7 @@ type RequestedPart struct {
 	SelectedQuantityIndex int `json:"SelectedQuantityIndex"`
 }
 
-// ListSummary is the metadata DigiKey returns for a list. The parts array is
-// only populated by GetListByListId.
+// ListSummary is the metadata DigiKey returns for a list.
 type ListSummary struct {
 	ID               string        `json:"Id"`
 	ListName         string        `json:"ListName"`
@@ -123,7 +122,9 @@ type ListSummary struct {
 	ListSettings     *ListSettings `json:"ListSettings,omitempty"`
 	// PartsList is decoded because the spec documents it, and is empty in every
 	// live response — TotalParts is correct while this stays []. Do not read it
-	// to find a line; use GetPartsByListId (AllListParts). See GetList.
+	// to find a line; use GetPartsByListId (AllListParts). The only operation
+	// that would ever populate it, GET /lists/{listId}, is not wrapped for
+	// exactly that reason — see the note above CreateList.
 	PartsList []RequestedPart `json:"PartsList,omitempty"`
 	CanEdit   bool            `json:"CanEdit"`
 }
@@ -482,29 +483,13 @@ func (c *Client) AllLists(ctx context.Context) ([]ListSummary, error) {
 		maxListPages, len(all))
 }
 
-// GetList returns a list's metadata by id.
-//
-// Not its parts, despite the spec: the live endpoint answers with a correct
-// TotalParts beside an empty PartsList, for every list, so nothing can be
-// looked up through it. `dk list set` did exactly that and could not find a
-// single part in any list. Use AllListParts for contents.
-func (c *Client) GetList(ctx context.Context, listID string) (*ListSummary, error) {
-	if strings.TrimSpace(listID) == "" {
-		return nil, errors.New("list id is required")
-	}
-	var out ListSummary
-	err := c.do(ctx, request{
-		method:      "GET",
-		path:        myListsBasePath + "/lists/" + url.PathEscape(listID),
-		requireUser: true,
-		out:         &out,
-		cacheScope:  ScopeLists,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
+// GET /lists/{listId} is deliberately not wrapped. It looks like the way to
+// read one list, and it cannot be: live it answers with a correct TotalParts
+// beside an empty PartsList, for every list, so no part can be looked up
+// through it — `dk list set` did exactly that and could not find a single part
+// in any list. Metadata already comes from Lists/AllLists via ResolveList, and
+// contents from AllListParts, so wrapping it would only offer a caller a
+// worse answer. See "Settled against the live API" in CONTRIBUTING.md.
 
 // CreateList creates a list and returns its id.
 func (c *Client) CreateList(ctx context.Context, req CreateListRequest) (string, error) {

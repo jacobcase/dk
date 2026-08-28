@@ -139,10 +139,21 @@ PARAMETRIC FILTERING
     dk search <keywords...> --param "NAME=VALUE"  apply it
 
   Example loop:
-    dk filters "0603 ceramic capacitor" --output json
-    dk filters "0603 ceramic capacitor" --parameter Capacitance --output json
-    dk search "0603 ceramic capacitor" \
-      --param "Capacitance=0.1 µF" --param "Tolerance=±10%" --in-stock
+    dk filters "0.1uF 0603 X7R 50V" --output json
+    dk filters "0.1uF 0603 X7R 50V" --parameter Tolerance --output json
+    dk search "0.1uF 0603 X7R 50V" --param "Tolerance=±10%" --in-stock
+
+  FIRST, THOUGH: DigiKey returns parametric facets only when the search lands
+  in a single leaf category, and it is stricter about that than it looks.
+  "0.1uF 0603 X7R 50V" (352 matches) comes back with 16 parameters; the broader
+  "0603 ceramic capacitor" (109,344 matches) comes back with NONE, and so does
+  "ring terminal heat shrink" at 553 matches. It is not about result size, and
+  a bigger --limit does not help — the facets are identical at every page size.
+  When "parameters" is empty, --param has nothing to resolve against and exits
+  2. Add specifics to the keywords, or pass a LEAF --category:
+    dk search "Ceramic Capacitors" --category 60 --param "Tolerance=±10%"
+  A parent category is not enough: --category 2031 (Terminals) still returns no
+  parameters. Use "dk categories <id>" to walk down to the leaf.
 
   filters JSON: {"query","total_matches","category":{"id","name"},
                  "top_categories":[...],"parameters":[{"parameter_id",
@@ -161,8 +172,9 @@ PARAMETRIC FILTERING
     instead of comma-joining: --param "X=C0G, NP0" works, and repeating
     --param for the same name merges the values.
   - Parameter ids are scoped to a category, so --param implies one. It is
-    inferred from the keywords; pass --category if the inference is wrong or if
-    dk reports that the parameters span more than one category.
+    inferred from the facets the keywords returned; pass a leaf --category if
+    the inference is wrong, if dk reports that the parameters span more than
+    one category, or if no parameters came back at all.
   - A wrong parameter or value name exits 2 and the error lists what IS
     available, so you can correct without re-running "dk filters".
   - values whose range_type is Min/Max/Range are synthetic bounds DigiKey adds
@@ -249,10 +261,16 @@ COSTING A QUANTITY
   .option is DigiKey's own label for the option, one of:
     Exact                 buys exactly the requested quantity
     MinimumOrderQuantity  a minimum forced the quantity up
-    BetterValue           costs LESS than the exact option while buying more
+    BetterValue           buys MORE at a lower price PER PIECE
     MaxOrderQuantity      DigiKey will not sell that many; capped BELOW it
-  BetterValue is worth surfacing unprompted: 5000 on a reel can cost less than
-  4500 on cut tape. Nothing you can compute from a single option produces it.
+
+  BetterValue describes the unit price, not the bill, and the two do not always
+  agree. Live, 478-KGM15BR71H104KTTR-ND at 11000 offers BetterValue 12000 for
+  $146.16 against Exact 11000 for $174.04 — cheaper outright. The SAME part at
+  9000 offers BetterValue 12000 for $146.16 against Exact 9000 for $133.64 —
+  $12.52 MORE, for a better per-piece rate. Never report BetterValue as a
+  saving without comparing .total_price yourself. .best already does: it is
+  chosen by total price, whatever the label says.
 
   An option can hold SEVERAL products: a quantity past a standard reel is
   filled with the reel plus a cut-tape remainder, priced as one option. Sum
@@ -274,6 +292,9 @@ COSTING A QUANTITY
   means DigiKey priced nothing. Present means dk discarded that many prices
   DigiKey did return, and the part IS available — just not in the packaging
   asked for. Never report "no pricing available" without checking it.
+
+  --raw emits DigiKey's untouched pricing payload instead of the view above.
+  It cannot be combined with --packaging, which filters that view.
 
 DATASHEETS AND DOCUMENTS
   The primary datasheet URL is already in search and product output as
@@ -332,15 +353,32 @@ LISTS
   the line unmatched. Always check "matched" in "dk list show" output, or the
   "unmatched_parts" count.
 
+  Two counts on "dk list show" qualify estimated_total, and BOTH have to be
+  read before quoting it:
+    unmatched_parts  lines DigiKey could not resolve to a product at all
+    unpriced_parts   lines that DID resolve but carry no price — typically a
+                     retired part with zero stock, which DigiKey returns no
+                     pack option for. A discontinued part that still HAS stock
+                     prices normally and is genuinely buyable.
+  Each such line contributes 0.00, so estimated_total is an UNDERESTIMATE by
+  however many they are, and a list where every line is unpriced totals 0.00
+  while looking complete. Neither count is an error: a BOM can legitimately
+  hold a part DigiKey no longer sells. Report them alongside the total rather
+  than dropping the lines — they are the ones a human most needs to see.
+
 CHOOSING A SEARCH STRATEGY
   DigiKey's parametric data describes COMPONENTS well and BOARDS poorly. Which
   strategy works depends on what is being asked for:
 
   Discrete components (resistors, capacitors, connectors, terminals, ICs)
-    Parametric filtering works well. Attributes like stud size, tolerance,
-    dielectric, pin count, and supply voltage are real parameters.
-      dk filters "ring terminal heat shrink"
-      dk search "ring terminal" --param "Stud/Tab Size=#10" --param "Insulation=Heat Shrink"
+    Parametric filtering works well once the query resolves to a leaf category.
+    Attributes like stud size, tolerance, dielectric, pin count, and supply
+    voltage are real parameters.
+      dk filters "0.1uF 0603 X7R 50V"
+      dk search "0.1uF 0603 X7R 50V" --param "Tolerance=±10%" --in-stock
+    A category-shaped phrase alone usually will NOT return parameters
+    ("ring terminal heat shrink" returns none), so either add the specifics
+    that pin the part down, or find the leaf category and pass --category.
 
   Dev boards and modules (Feather, QT Py, Pico, breakout sensor boards)
     Parametric coverage is thin: GPIO count, connector type (USB-C vs micro-B),
@@ -387,10 +425,10 @@ RECOMMENDED AGENT WORKFLOW
 
 NOTES
   - Prices exclude shipping and tax. estimated_total is a rough figure and skips
-    any line DigiKey could not price.
+    any line DigiKey could not price — see unpriced_parts under LISTS.
   - Marketplace items ship separately from the supplier; --no-marketplace
     excludes them.
-  - Use --env sandbox against DigiKey's sandbox host. Sandbox data is not real.
+  - Check dk env before trusting any figure: sandbox data is not real.
 `
 
 func newGuideCommand(app *App) *cobra.Command {
