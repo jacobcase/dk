@@ -62,6 +62,7 @@ const listPartsBody = `{
   "PartsList": [
     {
       "UniqueId":"uid-1","DigiKeyPartNumber":"490-1532-1-ND",
+      "RequestedPartNumber":"490-1532-1-ND","Notes":"decoupling",
       "ManufacturerPartNumber":"GRM188R71C104KA01D","Manufacturer":"Murata Electronics",
       "Description":"CAP CER 0.1UF 16V X7R 0603","ReferenceDesignator":"C1,C2",
       "QuantityAvailable":250000,"PartStatus":"Active","Flags":{"IsMatched":true},
@@ -127,11 +128,15 @@ func TestListSetClearsAFieldWithAnEmptyValue(t *testing.T) {
 	m.handle("GET", "/mylists/v1/lists", http.StatusOK,
 		`[{"Id":"aaa-111","ListName":"Bench PSU rev A","TotalParts":1}]`)
 	m.handle("GET", "/mylists/v1/lists/aaa-111/parts", http.StatusOK,
-		`{"TotalParts":1,"PartsList":[{"UniqueId":"u1","DigiKeyPartNumber":"490-1532-1-ND"}]}`)
+		`{"TotalParts":1,"PartsList":[
+		  {"UniqueId":"u1","DigiKeyPartNumber":"490-1532-1-ND","RequestedPartNumber":"490-1532-1-ND",
+		   "ReferenceDesignator":"C1-C10","Notes":"keep me",
+		   "Quantities":[{"QuantityRequested":10}]}]}`)
+	// The live shape: /lists/{id} answers with a correct TotalParts and an
+	// empty PartsList. Everything `dk list set` needs comes from /parts, and
+	// this route is here to fail the test if it is ever read again.
 	m.handle("GET", "/mylists/v1/lists/aaa-111", http.StatusOK,
-		`{"Id":"aaa-111","ListName":"Bench PSU rev A","PartsList":[
-		  {"UniqueId":"u1","RequestedPartNumber":"490-1532-1-ND","ReferenceDesignator":"C1-C10",
-		   "Notes":"keep me","Quantities":[{"Quantity":10}]}]}`)
+		`{"Id":"aaa-111","ListName":"Bench PSU rev A","TotalParts":1,"PartsList":[]}`)
 	m.handle("PUT", "/mylists/v1/lists/aaa-111/parts/u1", http.StatusOK, ``)
 
 	res := runAuthed(t, m, "list", "set", "Bench PSU rev A", "490-1532-1-ND", "--ref", "")
@@ -833,17 +838,14 @@ func TestParsePositiveInt(t *testing.T) {
 	}
 }
 
-// listDataBody is GetListByListId output: the editable RequestedPart shape,
-// which is what UpdatePart round-trips.
+// listDataBody is GetListByListId output, in the shape the live API actually
+// returns it: metadata with a correct TotalParts beside an empty PartsList.
+// The spec says that array holds the editable RequestedParts; no live response
+// has ever carried one, so nothing reads it and `dk list set` builds its update
+// from GetPartsByListId instead.
 const listDataBody = `{
   "Id":"aaa-111","ListName":"Bench PSU rev A","TotalParts":2,
-  "PartsList":[
-    {"UniqueId":"uid-1","RequestedPartNumber":"490-1532-1-ND",
-     "ReferenceDesignator":"C1,C2","Notes":"decoupling",
-     "Quantities":[{"Quantity":10,"SelectedPackType":"Cut Tape"}]},
-    {"UniqueId":"uid-2","RequestedPartNumber":"TYPO-PART-123",
-     "Quantities":[{"Quantity":5}]}
-  ]}`
+  "PartsList":[]}`
 
 func TestListSetQuantity(t *testing.T) {
 	m := newMockDigiKey(t)
@@ -868,6 +870,16 @@ func TestListSetQuantity(t *testing.T) {
 	}
 	if len(got.Changed) != 1 || got.Changed[0] != "quantity" {
 		t.Errorf("changed = %v, want only quantity", got.Changed)
+	}
+
+	// GET /lists/{id} answers with an empty PartsList live, so reading it to
+	// find the line reported every part in every list as an unknown unique id.
+	// The route is still registered above; asserting it goes untouched is what
+	// keeps a future refactor from reaching for it again.
+	for _, r := range m.requests {
+		if r.Method == http.MethodGet && r.Path == "/mylists/v1/lists/aaa-111" {
+			t.Error("dk list set read GET /lists/{id}; its PartsList is empty live, so the edit cannot come from there")
+		}
 	}
 
 	var body map[string]any
@@ -1083,19 +1095,19 @@ func TestSetQuantityKeepsTheSelectedLine(t *testing.T) {
 	}
 }
 
-func TestFindRequestedPart(t *testing.T) {
-	parts := []digikey.RequestedPart{
+func TestFindListPart(t *testing.T) {
+	parts := []digikey.ListPart{
 		{UniqueID: "uid-1", RequestedPartNumber: "A"},
 		{UniqueID: "uid-2", RequestedPartNumber: "B"},
 	}
-	if got, ok := findRequestedPart(parts, "uid-2"); !ok || got.RequestedPartNumber != "B" {
-		t.Errorf("findRequestedPart(uid-2) = (%+v, %v)", got, ok)
+	if got, ok := findListPart(parts, "uid-2"); !ok || got.RequestedPartNumber != "B" {
+		t.Errorf("findListPart(uid-2) = (%+v, %v)", got, ok)
 	}
-	if got, ok := findRequestedPart(parts, "UID-1"); !ok || got.RequestedPartNumber != "A" {
-		t.Errorf("findRequestedPart should be case-insensitive, got (%+v, %v)", got, ok)
+	if got, ok := findListPart(parts, "UID-1"); !ok || got.RequestedPartNumber != "A" {
+		t.Errorf("findListPart should be case-insensitive, got (%+v, %v)", got, ok)
 	}
-	if _, ok := findRequestedPart(parts, "nope"); ok {
-		t.Error("findRequestedPart(nope) ok = true")
+	if _, ok := findListPart(parts, "nope"); ok {
+		t.Error("findListPart(nope) ok = true")
 	}
 }
 
@@ -1110,14 +1122,15 @@ func TestListSetQuantityResetsTheSelectedIndex(t *testing.T) {
 	m.handle("GET", "/mylists/v1/lists", http.StatusOK,
 		`[{"Id":"aaa-111","ListName":"Bench PSU rev A","TotalParts":1}]`)
 	m.handle("GET", "/mylists/v1/lists/aaa-111/parts", http.StatusOK,
-		`{"TotalParts":1,"PartsList":[{"UniqueId":"u1","DigiKeyPartNumber":"490-1532-1-ND"}]}`)
-	m.handle("GET", "/mylists/v1/lists/aaa-111", http.StatusOK,
-		`{"Id":"aaa-111","ListName":"Bench PSU rev A","PartsList":[
-		  {"UniqueId":"u1","RequestedPartNumber":"490-1532-1-ND","SelectedQuantityIndex":2,
+		`{"TotalParts":1,"PartsList":[
+		  {"UniqueId":"u1","DigiKeyPartNumber":"490-1532-1-ND","RequestedPartNumber":"490-1532-1-ND",
+		   "SelectedQuantityIndex":2,
 		   "Quantities":[
-		     {"Quantity":10,"SelectedPackType":"CT"},
-		     {"Quantity":25,"SelectedPackType":"TR"},
-		     {"Quantity":40,"SelectedPackType":"DKR"}]}]}`)
+		     {"QuantityRequested":10,"SelectedPackType":"CT"},
+		     {"QuantityRequested":25,"SelectedPackType":"TR"},
+		     {"QuantityRequested":40,"SelectedPackType":"DKR"}]}]}`)
+	m.handle("GET", "/mylists/v1/lists/aaa-111", http.StatusOK,
+		`{"Id":"aaa-111","ListName":"Bench PSU rev A","TotalParts":1,"PartsList":[]}`)
 	m.handle("PUT", "/mylists/v1/lists/aaa-111/parts/u1", http.StatusOK, ``)
 
 	res := runAuthed(t, m, "list", "set", "Bench PSU rev A", "490-1532-1-ND", "--qty", "100")
@@ -1151,6 +1164,20 @@ func TestListSetQuantityResetsTheSelectedIndex(t *testing.T) {
 	if sent.SelectedQuantityIndex >= len(sent.Quantities) {
 		t.Errorf("SelectedQuantityIndex = %d with %d quantities sent: it names an entry that does not exist",
 			sent.SelectedQuantityIndex, len(sent.Quantities))
+	}
+	// The update is a replace, so the reset has to be *stated*. Under
+	// omitempty a reset to 0 vanishes from the body and DigiKey is left to
+	// infer it, which a replace API is not obliged to do.
+	var raw map[string]json.RawMessage
+	for _, r := range m.requests {
+		if r.Method == http.MethodPut {
+			if err := json.Unmarshal([]byte(r.Body), &raw); err != nil {
+				t.Fatalf("update body is not json: %v", err)
+			}
+		}
+	}
+	if _, ok := raw["SelectedQuantityIndex"]; !ok {
+		t.Error("SelectedQuantityIndex is absent from the update body; a replace cannot read an omitted field as a reset to 0")
 	}
 	if sent.Quantities[0].Quantity != 100 {
 		t.Errorf("Quantity = %d, want 100", sent.Quantities[0].Quantity)

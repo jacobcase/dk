@@ -291,6 +291,9 @@ func TestPricingFiltersByPackaging(t *testing.T) {
 		{"CT", []string{"311-10.0KHRCT-ND"}},
 		{"ct", []string{"311-10.0KHRCT-ND"}},
 		{"DKR", []string{"311-10.0KHRDKR-ND"}},
+		// A full reel is routinely the cheapest way to buy a quantity, so the
+		// packaging BetterValue arrives in has to be one --packaging can name.
+		{"TR", []string{"311-10.0KHRTR-ND"}},
 		{"", []string{"311-10.0KHRCT-ND", "311-10.0KHRDKR-ND", "311-10.0KHRTR-ND"}},
 	}
 
@@ -412,7 +415,7 @@ func TestPricingRejectsBadQuantity(t *testing.T) {
 }
 
 func TestPricingRejectsUnknownPackaging(t *testing.T) {
-	// CT and DKR are the only two packagings DigiKey names. Anything else was
+	// CT, TR and DKR are the packagings this filter can name. Anything else was
 	// silently ignored server-side by the endpoint this command used to call,
 	// and here it would filter every option away for no stated reason.
 	// "CutTapeOrTR" is the value dk itself documented until the flag was
@@ -423,6 +426,7 @@ func TestPricingRejectsUnknownPackaging(t *testing.T) {
 		want      int
 	}{
 		{"documented cut tape", "CT", ExitOK},
+		{"documented tape and reel", "TR", ExitOK},
 		{"documented digi-reel", "DKR", ExitOK},
 		{"lowercase is accepted", "ct", ExitOK},
 		{"empty means every option", "", ExitOK},
@@ -619,5 +623,101 @@ func TestPricingCSVKeepsAMixedOptionGroupable(t *testing.T) {
 	// And each row keeps its own product's figures.
 	if rows[1][4] != "311-10.0KHRTR-ND" || rows[2][4] != "311-10.0KHRCT-ND" {
 		t.Errorf("part numbers = %q and %q, want one product per row", rows[1][4], rows[2][4])
+	}
+}
+
+// The filter matches PackageType.Id, not PackageType.Name. Name is display text
+// that DigiKey localizes — a JP-site response calls id 2 "カット テープ（CT）" —
+// so an English substring match returned nothing at all off the US site and
+// reported a normally-priced part as unavailable.
+func TestPricingPackagingMatchesIDNotLocalizedName(t *testing.T) {
+	const localized = `{"RequestedProduct":"X","RequestedQuantity":250,"MyPricingOptions":[],
+	  "StandardPricingOptions":[
+	    {"PricingOption":"Exact","TotalQuantityPriced":250,"TotalPrice":1.17,
+	     "Products":[
+	       {"DigiKeyProductNumber":"311-10.0KHRCT-ND","QuantityPriced":250,"ExtendedPrice":1.17,
+	        "UnitPrice":0.00469,"PackageType":{"Id":2,"Name":"\u30ab\u30c3\u30c8 \u30c6\u30fc\u30d7\uff08CT\uff09"}}]}]}`
+	const details = `{"Product":{"ProductStatus":{"Status":"Active"},
+	  "ProductVariations":[{"DigiKeyProductNumber":"311-10.0KHRCT-ND",
+	    "QuantityAvailableforPackageType":4244251,"PackageType":{"Id":2,"Name":"\u30ab\u30c3\u30c8 \u30c6\u30fc\u30d7\uff08CT\uff09"}}]}}`
+
+	m := newMockDigiKey(t)
+	m.handle("GET", "/products/v4/search/X/pricingbyquantity/250", http.StatusOK, localized)
+	m.handle("GET", "/products/v4/search/311-10.0KHRCT-ND/productdetails", http.StatusOK, details)
+
+	res := run(t, m, "pricing", "X", "--qty", "250", "--packaging", "CT")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+	var got PricingResult
+	res.JSON(t, &got)
+	if len(got.Options) != 1 {
+		t.Fatalf("options = %+v, want the cut-tape option kept despite its localized name", got.Options)
+	}
+}
+
+// An empty result has two very different causes, and the output has to say
+// which. "DigiKey returned no pricing options" for options DigiKey did return
+// and --packaging discarded reports a priced part as unpriceable.
+func TestPricingEmptyAfterFilterBlamesTheFilter(t *testing.T) {
+	m2 := newMockDigiKey(t)
+	const ctOnly = `{"RequestedProduct":"X","RequestedQuantity":250,"MyPricingOptions":[],
+	  "StandardPricingOptions":[
+	    {"PricingOption":"Exact","TotalQuantityPriced":250,"TotalPrice":1.17,
+	     "Products":[
+	       {"DigiKeyProductNumber":"311-10.0KHRCT-ND","QuantityPriced":250,"ExtendedPrice":1.17,
+	        "UnitPrice":0.00469,"PackageType":{"Id":2,"Name":"Cut Tape (CT)"}}]}]}`
+	m2.handle("GET", "/products/v4/search/X/pricingbyquantity/250", http.StatusOK, ctOnly)
+
+	res2 := run(t, m2, "pricing", "X", "--qty", "250", "--packaging", "DKR", "--output", "table")
+	if res2.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res2.Code, res2.Stderr)
+	}
+	out := res2.Stdout + res2.Stderr
+	if strings.Contains(out, "DigiKey returned no pricing options") {
+		t.Errorf("empty result blames DigiKey for what --packaging dropped:\n%s", out)
+	}
+	if !strings.Contains(out, "packaging") {
+		t.Errorf("empty result does not say the filter emptied it:\n%s", out)
+	}
+
+	// The table line is prose, and prose is suppressed in JSON by design, so a
+	// scripted caller can only tell the two cases apart from the payload.
+	m3 := newMockDigiKey(t)
+	m3.handle("GET", "/products/v4/search/X/pricingbyquantity/250", http.StatusOK, ctOnly)
+	res3 := run(t, m3, "pricing", "X", "--qty", "250", "--packaging", "DKR")
+	if res3.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res3.Code, res3.Stderr)
+	}
+	var got PricingResult
+	res3.JSON(t, &got)
+	if len(got.Options) != 0 || got.Best != nil {
+		t.Fatalf("options = %+v, best = %+v, want both empty", got.Options, got.Best)
+	}
+	if got.PackagingFilteredOut != 1 {
+		t.Errorf("packaging_filtered_out = %d, want 1: without it options:[] reads as an unpriceable part",
+			got.PackagingFilteredOut)
+	}
+	if got.Packaging != "DKR" {
+		t.Errorf("packaging = %q, want DKR", got.Packaging)
+	}
+}
+
+// No filter, no keys: a caller testing for packaging_filtered_out must not find
+// a zero on a result that was never narrowed.
+func TestPricingOmitsPackagingKeysWithoutTheFlag(t *testing.T) {
+	m := pricingMock(t, "311-10.0KHRCT-ND", "250", pricingBody, detailsBody)
+	res := run(t, m, "pricing", "311-10.0KHRCT-ND", "--qty", "250")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(res.Stdout), &raw); err != nil {
+		t.Fatalf("stdout is not json: %v", err)
+	}
+	for _, k := range []string{"packaging", "packaging_filtered_out"} {
+		if _, ok := raw[k]; ok {
+			t.Errorf("%q is present without --packaging", k)
+		}
 	}
 }

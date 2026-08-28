@@ -206,9 +206,11 @@ so you can pick the right one for "dk list add".`,
 	f.BoolVar(&parameters, "parameters", false, "show parametric attributes")
 	f.BoolVar(&substitutes, "substitutes", false, "show substitute parts instead of details")
 	f.BoolVar(&recommended, "recommended", false, "show products commonly bought with this one")
-	// DigiKey defaults this endpoint to a single result, so a default of 1 here
-	// would silently look like "there is only one recommendation".
-	f.IntVar(&recLimit, "recommended-limit", 10, "how many recommendations to request (DigiKey defaults to 1)")
+	// Requested, not enforced: DigiKey ignores this parameter and answers with
+	// the same set whatever it is asked for. The flag stays because the request
+	// is free and the server may start honoring it; a caller must not read the
+	// number of results as evidence that it did.
+	f.IntVar(&recLimit, "recommended-limit", 10, "how many recommendations to ask for (DigiKey currently ignores it)")
 	f.BoolVar(&altPackaging, "alternate-packaging", false, "show the same part in other packaging")
 	f.BoolVar(&raw, "raw", false, "emit DigiKey's unmodified response (implies --output json)")
 

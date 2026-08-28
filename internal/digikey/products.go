@@ -609,7 +609,8 @@ type RecommendedProductsResponse struct {
 }
 
 // recommendedQuery builds the recommendedproducts query. A limit of 0 sends
-// nothing, leaving DigiKey's own default in force.
+// nothing, leaving DigiKey's own default in force — which, live, is what every
+// other value leaves in force too. See RecommendedProducts.
 func recommendedQuery(limit int) url.Values {
 	if limit <= 0 {
 		return nil
@@ -619,9 +620,11 @@ func recommendedQuery(limit int) url.Values {
 
 // RecommendedProducts returns products commonly bought with this one.
 //
-// limit caps how many come back. It matters more than it looks: DigiKey's
-// default is 1, so omitting it returns a single recommendation and nothing in
-// the response says the rest were withheld. Pass 0 only to accept that default.
+// limit is sent when positive and ignored by DigiKey when it arrives: the spec
+// documents a default of 1, and live every value returns the same 10 — limit=1
+// and limit=50 alike. It is kept because it costs a query parameter and the
+// server may yet honor it; do not build anything on it capping the result, and
+// do not read a short answer as the limit working. See CONTRIBUTING.md.
 func (c *Client) RecommendedProducts(ctx context.Context, partNumber string, limit int) ([]Recommendation, error) {
 	if strings.TrimSpace(partNumber) == "" {
 		return nil, errors.New("product number is required")
@@ -691,8 +694,10 @@ type PricingOptionProduct struct {
 // reason this endpoint is worth more than a price: "Exact" buys what was asked
 // for, "MinimumOrderQuantity" is the quantity forced up by a minimum,
 // "BetterValue" costs less than the exact option while buying more, and
-// "MaxOrderQuantity" is capped above. Nothing derived locally can produce
-// BetterValue — it is a comparison across the whole option set.
+// "MaxOrderQuantity" is capped *below* it — DigiKey lowering the request to the
+// most it will sell, which is a shortfall, not a surplus. Nothing derived
+// locally can produce BetterValue — it is a comparison across the whole option
+// set.
 type PricingOption struct {
 	PricingOption       string                 `json:"PricingOption"`
 	TotalQuantityPriced int                    `json:"TotalQuantityPriced"`

@@ -442,6 +442,9 @@ func TestDeletePartPath(t *testing.T) {
 }
 
 func TestGetListDecodesRequestedParts(t *testing.T) {
+	// A decode test, not a statement about the live API: PartsList is populated
+	// here so the tags round-trip, and comes back empty from every real
+	// response. Nothing in dk looks a part up through GetList — see its doc.
 	body := `{"Id":"aaa-111","ListName":"Bench PSU rev A","TotalParts":1,
 	  "Tags":["project"],
 	  "PartsList":[{"UniqueId":"uid-1","RequestedPartNumber":"490-1532-1-ND",

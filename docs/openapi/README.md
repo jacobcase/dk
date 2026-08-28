@@ -22,8 +22,8 @@ you need, and use the spec download on the endpoint page. Each download is the
 
 Both are Swagger 2.0, self-contained (every `$ref` resolves inside the file),
 and are what `internal/digikey` is modeled against. dk calls 11 of the 14
-Product Information paths (`/pricing`, `/pricingbyquantity`, and
-`/digireelpricing` are the documented omissions) and 7 of the 9 MyLists
-operations. The Product Change Notifications API has its own spec download and
+Product Information paths (`/pricing`, `/packagetypebyquantity`, and
+`/digireelpricing` are the documented omissions — `/pricingbyquantity` is what
+`dk pricing` is built on) and 7 of the 9 MyLists operations. The Product Change Notifications API has its own spec download and
 is deliberately not kept here: dk never calls it, and "PCN" in this codebase is
 a MediaType string from `/search/{productNumber}/media`, not that API.

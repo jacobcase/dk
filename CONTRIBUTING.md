@@ -343,6 +343,50 @@ for shapes DigiKey does not produce.
   with an empty `Products`. Do not add a "missing quantity" or "option with no
   products" branch on the strength of the spec; neither shape exists.
 
+Five more, tested 2026-08-28 against the live API.
+
+- **`GET /mylists/v1/lists/{listId}` returns an empty `PartsList`, always.**
+  The spec documents it as the list's editable `RequestedPart`s, and it is the
+  natural place to read a line before writing it back. Live it answers with a
+  correct `TotalParts` beside `PartsList: []` — 1-part and 17-part lists both.
+  `dk list set` read it, found nothing, and reported every part in every list as
+  an unknown unique id: the command could not edit anything and never could.
+  Contents come from `GetPartsByListId` (`AllListParts`), which returns
+  `ListPart`, so an edit converts with `ListPart.RequestedPart()`. The unit
+  tests did not catch this because their fixture filled the array in.
+
+- **`PackageType.Name` is localized; `PackageType.Id` is not.** A JP-site
+  response calls id 2 "カット テープ（CT）" and id 1 "テープ＆リール（TR）", while
+  the ids are 1/2/243 on every locale. `--packaging` matched the English name
+  and so matched nothing off the US site — `--packaging CT` printed "DigiKey
+  returned no pricing options" for a part DigiKey had just priced three ways.
+  Match ids. Note it takes site *and* language to trigger: `language=ja` against
+  the US site still answers in English. Ids seen live: 1 Tape & Reel, 2 Cut
+  Tape, 62 Bag, 243 Digi-Reel.
+
+- **`recommendedproducts` ignores `limit`.** The spec documents a default of 1.
+  Live, `limit=1`, `limit=3`, `limit=25`, `limit=50` and sending no limit at all
+  every one returned the same 10 recommendations. `--recommended-limit` is a
+  request, not a cap; do not read the size of the result as evidence it applied,
+  and do not "fix" it by validating the value.
+
+- **The `pricingbyquantity` → `ProductDetails` stock join does not miss.**
+  Across 15 parts — multi-variation passives, kits, dev boards, a discontinued
+  part, an out-of-stock part, a split reel-plus-remainder option — every DigiKey
+  part number in a pricing option was also a `ProductVariation` of the product
+  looked up. Zero unmatched. The zero-stock lines that turned up were genuinely
+  zero. Do not add a "join missed vs really out of stock" distinction on the
+  strength of the spec; the shape it would guard against did not occur.
+
+- **`AllLists` cannot end on its first page, and the second request is not
+  waste.** An out-of-range `startIndex` returns `[]` (see above), so the walk
+  has to see that empty page to know it is done. Ending early on a page shorter
+  than `listPageDefault` looks like a free request saved and is not: a server
+  capping pages below 50 returns a short first page for an account with more
+  lists behind it, and the walk would return a truncated listing that looks
+  complete. `/lists` answers with a bare array and no total, so there is no
+  cheaper signal to end on. Two GETs per walk is the price of the guarantee.
+
 ## Endpoint coverage
 
 Product Information v4 is fully covered except `/pricing`,

@@ -204,6 +204,7 @@ COSTING A QUANTITY
   every way DigiKey will sell that quantity.
 
   JSON: {"part_number","requested_quantity","currency",
+         "packaging","packaging_filtered_out",   (only when --packaging is set)
          "best":{...} | null,
          "options":[{"option","order_quantity","forced_up","short","total_price",
                      "in_stock",
@@ -231,7 +232,7 @@ COSTING A QUANTITY
     Exact                 buys exactly the requested quantity
     MinimumOrderQuantity  a minimum forced the quantity up
     BetterValue           costs LESS than the exact option while buying more
-    MaxOrderQuantity      capped above the requested quantity
+    MaxOrderQuantity      DigiKey will not sell that many; capped BELOW it
   BetterValue is worth surfacing unprompted: 5000 on a reel can cost less than
   4500 on cut tape. Nothing you can compute from a single option produces it.
 
@@ -246,9 +247,15 @@ COSTING A QUANTITY
   on a product means its own line can be filled; on an option it means every
   product in it can.
 
-  --packaging filters the returned options rather than asking DigiKey for a
-  preference. An option mixing a reel with a cut-tape remainder is not a CT
-  option and is filtered out of --packaging CT.
+  --packaging CT | TR | DKR filters the returned options rather than asking
+  DigiKey for a preference. An option mixing a reel with a cut-tape remainder
+  is not a CT option and is filtered out of --packaging CT.
+
+  It can empty the result, and an empty "options" then means something quite
+  different from an unpriceable part: read .packaging_filtered_out. Absent
+  means DigiKey priced nothing. Present means dk discarded that many prices
+  DigiKey did return, and the part IS available — just not in the packaging
+  asked for. Never report "no pricing available" without checking it.
 
 DATASHEETS AND DOCUMENTS
   The primary datasheet URL is already in search and product output as

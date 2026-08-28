@@ -280,20 +280,18 @@ mint a new one and lose the reference designators and notes.`,
 			}
 			uniqueID := uniqueIDs[0]
 
-			// DigiKey's update is a replace, not a patch, so read the existing
-			// RequestedPart and modify it rather than sending a partial object.
+			// DigiKey's update is a replace, not a patch, so the existing line
+			// is modified and sent back whole rather than as a partial object.
 			//
-			// Live, for two reasons. Every field no flag names is echoed
-			// straight back, so a cached copy silently reverts a note or a
-			// reference designator edited elsewhere since it was stored. And
-			// this has to see the same lines the match above saw: that read is
-			// Live, so a part added since would be found there and missing
-			// here, reporting a plainly present part as an unknown unique id.
-			full, err := client.GetList(digikey.Live(ctx), summary.ID)
-			if err != nil {
-				return err
-			}
-			existing, ok := findRequestedPart(full.PartsList, uniqueID)
+			// It comes from the parts read above, not from GET /lists/{listId}.
+			// That endpoint documents a PartsList of exactly the shape wanted
+			// here and returns it empty for every list, so reading it found
+			// nothing and reported every part in every list as an unknown
+			// unique id — `dk list set` could not edit anything. See
+			// CONTRIBUTING.md. Reusing the parts already in hand also drops a
+			// request, and removes the window where that second read disagreed
+			// with the match above.
+			line, ok := findListPart(parts.PartsList, uniqueID)
 			if !ok {
 				return &Error{
 					Code:     CodeNotFound,
@@ -301,6 +299,7 @@ mint a new one and lose the reference designators and notes.`,
 					ExitCode: ExitNotFound,
 				}
 			}
+			existing := line.RequestedPart()
 
 			before := entryView(existing)
 			updated := existing
@@ -364,14 +363,14 @@ mint a new one and lose the reference designators and notes.`,
 	return cmd
 }
 
-// findRequestedPart locates a list entry by unique id.
-func findRequestedPart(parts []digikey.RequestedPart, uniqueID string) (digikey.RequestedPart, bool) {
+// findListPart locates a list entry by unique id.
+func findListPart(parts []digikey.ListPart, uniqueID string) (digikey.ListPart, bool) {
 	for _, p := range parts {
 		if strings.EqualFold(p.UniqueID, uniqueID) {
 			return p, true
 		}
 	}
-	return digikey.RequestedPart{}, false
+	return digikey.ListPart{}, false
 }
 
 // setQuantity replaces the quantity on a line, preserving the pack type of the

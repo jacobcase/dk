@@ -95,29 +95,37 @@ type RequestedPart struct {
 	Quantities          []RequestedQuantity `json:"Quantities,omitempty"`
 	// SelectedQuantityIndex names which Quantities entry the line is priced
 	// from. It has to be here because DigiKey's part update is a replace, not a
-	// patch: `dk list set` reads a RequestedPart and sends it back, so a field
-	// this struct cannot hold is a field the write silently resets to zero.
-	SelectedQuantityIndex int `json:"SelectedQuantityIndex,omitempty"`
+	// patch: `dk list set` reads a line and sends it back, so a field this
+	// struct cannot hold is a field the write silently resets to zero.
+	//
+	// No omitempty, unlike its neighbours. `dk list set --qty` resets this to 0
+	// deliberately, and omitempty would drop that reset from the body — leaving
+	// a replace-semantics API to infer a zero dk meant to state. The one field
+	// here whose zero is a decision is the one field that has to be sent.
+	SelectedQuantityIndex int `json:"SelectedQuantityIndex"`
 }
 
 // ListSummary is the metadata DigiKey returns for a list. The parts array is
 // only populated by GetListByListId.
 type ListSummary struct {
-	ID               string          `json:"Id"`
-	ListName         string          `json:"ListName"`
-	CreatedBy        string          `json:"CreatedBy"`
-	CustomerID       int             `json:"CustomerId"`
-	AccountID        int             `json:"AccountId"`
-	CompanyName      string          `json:"CompanyName"`
-	Notes            string          `json:"Notes"`
-	TotalParts       int             `json:"TotalParts"`
-	DateCreated      string          `json:"DateCreated"`
-	DateLastAccessed string          `json:"DateLastAccessed"`
-	DateModified     string          `json:"DateModified"`
-	Tags             []string        `json:"Tags"`
-	ListSettings     *ListSettings   `json:"ListSettings,omitempty"`
-	PartsList        []RequestedPart `json:"PartsList,omitempty"`
-	CanEdit          bool            `json:"CanEdit"`
+	ID               string        `json:"Id"`
+	ListName         string        `json:"ListName"`
+	CreatedBy        string        `json:"CreatedBy"`
+	CustomerID       int           `json:"CustomerId"`
+	AccountID        int           `json:"AccountId"`
+	CompanyName      string        `json:"CompanyName"`
+	Notes            string        `json:"Notes"`
+	TotalParts       int           `json:"TotalParts"`
+	DateCreated      string        `json:"DateCreated"`
+	DateLastAccessed string        `json:"DateLastAccessed"`
+	DateModified     string        `json:"DateModified"`
+	Tags             []string      `json:"Tags"`
+	ListSettings     *ListSettings `json:"ListSettings,omitempty"`
+	// PartsList is decoded because the spec documents it, and is empty in every
+	// live response — TotalParts is correct while this stays []. Do not read it
+	// to find a line; use GetPartsByListId (AllListParts). See GetList.
+	PartsList []RequestedPart `json:"PartsList,omitempty"`
+	CanEdit   bool            `json:"CanEdit"`
 }
 
 // ListPackOption is one packaging choice DigiKey priced for a quantity line.
@@ -144,7 +152,27 @@ type ListPartQuantity struct {
 	// as it does for SelectedSubPackOptionIndex.
 	SelectedPackOptionIndex *int             `json:"SelectedPackOptionIndex"`
 	SelectedPackType        string           `json:"SelectedPackType"`
+	SelectedSubPackType     string           `json:"SelectedSubPackType"`
 	PackOptions             []ListPackOption `json:"PackOptions"`
+}
+
+// packTypeForWrite names the pack type to send back when this line is written
+// out as a RequestedQuantity, which carries a pack type by name and has no
+// index to carry instead.
+//
+// It uses only what DigiKey actually selected: the index when it names a real
+// option, then the name if one is set. SelectedPackOption's "first priced
+// option" fallback is deliberately not used here. Guessing is defensible when
+// the answer is a price to display and wrong by a column; it is not when the
+// answer is a pack type about to be written back over the line, where a guess
+// silently repacks the part.
+func (q ListPartQuantity) packTypeForWrite() string {
+	if i := q.SelectedPackOptionIndex; i != nil && *i >= 0 && *i < len(q.PackOptions) {
+		if t := strings.TrimSpace(q.PackOptions[*i].PackType); t != "" {
+			return t
+		}
+	}
+	return q.SelectedPackType
 }
 
 // SelectedPackOption returns the pack option that applies to this quantity
@@ -194,14 +222,22 @@ func (q ListPartQuantity) SelectedPackOption() (ListPackOption, bool) {
 
 // ListPart is a fully resolved part in a list, including live availability.
 type ListPart struct {
-	PartID                    int                `json:"PartId"`
-	UniqueID                  string             `json:"UniqueId"`
-	CustomerReference         string             `json:"CustomerReference"`
-	ReferenceDesignator       string             `json:"ReferenceDesignator"`
-	Notes                     string             `json:"Notes"`
-	MinOrderQty               int                `json:"MinOrderQty"`
-	RequestedPartNumber       string             `json:"RequestedPartNumber"`
-	DigiKeyPartNumber         string             `json:"DigiKeyPartNumber"`
+	PartID              int    `json:"PartId"`
+	UniqueID            string `json:"UniqueId"`
+	CustomerReference   string `json:"CustomerReference"`
+	ReferenceDesignator string `json:"ReferenceDesignator"`
+	Notes               string `json:"Notes"`
+	MinOrderQty         int    `json:"MinOrderQty"`
+	RequestedPartNumber string `json:"RequestedPartNumber"`
+	DigiKeyPartNumber   string `json:"DigiKeyPartNumber"`
+	// The next four are carried for one reason: this struct is the only live
+	// source of a list line, so an edit reads it and writes it back. DigiKey's
+	// part update is a replace, and a field this struct cannot hold is a field
+	// every `dk list set` silently clears. See RequestedPart below.
+	OriginalPartNumber        string             `json:"OriginalPartNumber"`
+	AlternateParts            []string           `json:"AlternateParts"`
+	Attrition                 float64            `json:"Attrition"`
+	SelectedQuantityIndex     int                `json:"SelectedQuantityIndex"`
 	ManufacturerPartNumber    string             `json:"ManufacturerPartNumber"`
 	RequestedManufacturerName string             `json:"RequestedManufacturerName"`
 	Manufacturer              string             `json:"Manufacturer"`
@@ -224,6 +260,45 @@ type ListPart struct {
 		IsMarketPlace bool `json:"IsMarketPlace"`
 		BoNotAllowed  bool `json:"BoNotAllowed"`
 	} `json:"Flags"`
+}
+
+// RequestedPart converts a resolved list line back into the shape DigiKey's
+// part update takes.
+//
+// This exists because the two are not the same object and only one of them can
+// be read live. `GET /lists/{listId}` documents a PartsList of RequestedParts
+// and returns it empty for every list — see CONTRIBUTING.md — so the only way
+// to see what is on a line is GetPartsByListId, which answers in ListParts.
+// An update is a replace, so everything the write model carries has to survive
+// the trip: a field dropped here is a field `dk list set --note` erases while
+// changing the note.
+func (p ListPart) RequestedPart() RequestedPart {
+	quantities := make([]RequestedQuantity, 0, len(p.Quantities))
+	for _, q := range p.Quantities {
+		quantities = append(quantities, RequestedQuantity{
+			// QuantityRequested is what the user asked for; CalculatedQuantity
+			// is that plus attrition, which DigiKey derives. Sending the
+			// derived figure back would compound the attrition on every edit.
+			Quantity:            q.QuantityRequested,
+			SelectedPackType:    q.packTypeForWrite(),
+			SelectedSubPackType: q.SelectedSubPackType,
+			TargetPrice:         q.TargetPrice,
+		})
+	}
+	return RequestedPart{
+		UniqueID:              p.UniqueID,
+		PartID:                p.PartID,
+		RequestedPartNumber:   p.RequestedPartNumber,
+		OriginalPartNumber:    p.OriginalPartNumber,
+		ManufacturerName:      p.RequestedManufacturerName,
+		CustomerReference:     p.CustomerReference,
+		ReferenceDesignator:   p.ReferenceDesignator,
+		Notes:                 p.Notes,
+		Attrition:             p.Attrition,
+		AlternateParts:        p.AlternateParts,
+		Quantities:            quantities,
+		SelectedQuantityIndex: p.SelectedQuantityIndex,
+	}
 }
 
 // RequestedQty returns the quantity the user asked for, summed across quantity
@@ -407,7 +482,12 @@ func (c *Client) AllLists(ctx context.Context) ([]ListSummary, error) {
 		maxListPages, len(all))
 }
 
-// GetList returns a list's metadata and requested parts by id.
+// GetList returns a list's metadata by id.
+//
+// Not its parts, despite the spec: the live endpoint answers with a correct
+// TotalParts beside an empty PartsList, for every list, so nothing can be
+// looked up through it. `dk list set` did exactly that and could not find a
+// single part in any list. Use AllListParts for contents.
 func (c *Client) GetList(ctx context.Context, listID string) (*ListSummary, error) {
 	if strings.TrimSpace(listID) == "" {
 		return nil, errors.New("list id is required")

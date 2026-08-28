@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -71,6 +72,18 @@ type PricingResult struct {
 	// find the key missing entirely.
 	Best    *PricingOption  `json:"best"`
 	Options []PricingOption `json:"options"`
+	// Packaging is the --packaging filter this result was narrowed by, and
+	// PackagingFilteredOut how many of DigiKey's options it discarded. Both are
+	// absent when no filter ran.
+	//
+	// They exist so an empty options array is readable by a machine. Prose on
+	// stderr is suppressed in JSON and CSV by design, so the table's "none of
+	// them were CT" line reaches nobody scripting this command: without these
+	// keys, "DigiKey has no price for this quantity" and "dk threw away three
+	// prices DigiKey did return" are the same output. An empty options array
+	// means the former only when PackagingFilteredOut is absent.
+	Packaging            string `json:"packaging,omitempty"`
+	PackagingFilteredOut int    `json:"packaging_filtered_out,omitempty"`
 }
 
 func newPricingCommand(app *App) *cobra.Command {
@@ -110,15 +123,20 @@ DigiKey returns any.`,
 			if quantity < 1 {
 				return usageErrorf("--qty must be at least 1")
 			}
-			// CT and DKR are the two packagings DigiKey names. This is a filter
-			// over what comes back rather than a request parameter: the pricing
-			// endpoint has no packaging preference and answers with every
-			// option, which is more than the old one could say.
+			// A filter over what comes back rather than a request parameter:
+			// the pricing endpoint has no packaging preference and answers with
+			// every option, which is more than the old one could say.
+			//
+			// TR belongs here as much as the other two. It is the packaging a
+			// BetterValue option is usually in — a full reel undercutting cut
+			// tape is the headline this command exists to surface — so leaving
+			// it out made the cheapest result the one thing --packaging could
+			// not ask for.
 			preference = strings.ToUpper(strings.TrimSpace(preference))
-			switch preference {
-			case "", "CT", "DKR":
-			default:
-				return usageErrorf("--packaging must be CT (cut tape) or DKR (Digi-Reel), got %q", preference)
+			if preference != "" {
+				if _, ok := packagingIDs[preference]; !ok {
+					return usageErrorf("--packaging must be CT (cut tape), TR (tape & reel), or DKR (Digi-Reel), got %q", preference)
+				}
 			}
 
 			client, err := app.Client()
@@ -131,6 +149,12 @@ DigiKey returns any.`,
 			}
 
 			options := resp.Options()
+			// Kept so the empty result can say who emptied it. "DigiKey
+			// returned no pricing options" is a claim about DigiKey, and an
+			// agent relaying it reports the part as unpriceable at this
+			// quantity — when what happened is that --packaging discarded
+			// every option DigiKey did return.
+			returned := len(options)
 			if preference != "" {
 				options = filterByPackaging(options, preference)
 			}
@@ -166,19 +190,26 @@ DigiKey returns any.`,
 			}
 
 			result := PricingResult{
-				PartNumber:        partNumber,
-				RequestedQuantity: quantity,
-				Currency:          currency,
-				Options:           []PricingOption{},
+				PartNumber:           partNumber,
+				RequestedQuantity:    quantity,
+				Currency:             currency,
+				Options:              []PricingOption{},
+				Packaging:            preference,
+				PackagingFilteredOut: returned - len(options),
 			}
 			for _, o := range options {
 				result.Options = append(result.Options, buildPricingOption(o, quantity, stock, status))
 			}
 			result.Best = cheapestInStock(result.Options)
 
+			empty := "DigiKey returned no pricing options for this part and quantity."
+			if len(result.Options) == 0 && returned > 0 {
+				empty = fmt.Sprintf("DigiKey priced this quantity, but no option is %s packaging. Re-run without --packaging to see the %d it returned.",
+					preference, returned)
+			}
 			t := &output.Table{
 				Headers: []string{"#", "OPTION", "ORDER QTY", "TOTAL", "DKPN", "PACKAGING", "QTY", "UNIT", "STOCK", "STATUS"},
-				Empty:   "DigiKey returned no pricing options for this part and quantity.",
+				Empty:   empty,
 			}
 			for n, o := range result.Options {
 				for i, p := range o.Products {
@@ -308,19 +339,28 @@ func firstPartNumber(options []digikey.PricingOption) string {
 	return ""
 }
 
-// packagingNames maps the codes DigiKey documents for a packaging preference
-// onto the package-type names it returns. The two vocabularies do not match:
-// the codes are CT and DKR, the names are "Cut Tape (CT)" and "Digi-Reel®".
-var packagingNames = map[string]string{
-	"CT":  "cut tape",
-	"DKR": "digi-reel",
+// packagingIDs maps the codes DigiKey documents for a packaging preference onto
+// the PackageType ids it answers with. The two vocabularies do not match: the
+// codes are CT, TR and DKR, the names are "Cut Tape (CT)", "Tape & Reel (TR)"
+// and "Digi-Reel®".
+//
+// Ids rather than those names, because the name is display text and the id is
+// not: a JP-site response calls id 2 "カット テープ（CT）", where a match on the
+// English string finds nothing and the filter silently empties the result.
+// Package types dk has no code for keep their id anyway — WK-KIT-ND ships in
+// id 62, "Bag" — so this is a whitelist of what --packaging can name, not of
+// what DigiKey sells.
+var packagingIDs = map[string]int{
+	"CT":  2,
+	"TR":  1,
+	"DKR": 243,
 }
 
 // filterByPackaging keeps options built entirely from one packaging. An option
 // that mixes a reel with a cut-tape remainder is not a CT option, and returning
 // it under --packaging CT would quote a reel the caller filtered out.
 func filterByPackaging(options []digikey.PricingOption, code string) []digikey.PricingOption {
-	want, ok := packagingNames[code]
+	want, ok := packagingIDs[code]
 	if !ok {
 		return options
 	}
@@ -328,7 +368,7 @@ func filterByPackaging(options []digikey.PricingOption, code string) []digikey.P
 	for _, o := range options {
 		all := len(o.Products) > 0
 		for _, p := range o.Products {
-			if !strings.Contains(strings.ToLower(p.PackageType.Name), want) {
+			if p.PackageType.ID != want {
 				all = false
 				break
 			}
