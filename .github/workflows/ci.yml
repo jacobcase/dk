@@ -62,6 +62,20 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # Read from the Makefile rather than pinned a second time here. CI ran
+      # `latest` while `make lint-full` pinned a version, so a golangci-lint
+      # release could fail CI on code that linted clean locally — and the fix
+      # would have been to chase a version number nobody had chosen. Same
+      # reasoning as go-version-file above.
+      - name: Read the golangci-lint version the Makefile pins
+        id: golangci
+        run: |
+          version=$(sed -n 's|^GOLANGCI *:=.*golangci-lint@\(v[0-9][^ ]*\)[[:space:]]*$|\1|p' Makefile)
+          if [ -z "$version" ]; then
+            echo "no golangci-lint version found in the Makefile's GOLANGCI line"; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: ${{ steps.golangci.outputs.version }}
