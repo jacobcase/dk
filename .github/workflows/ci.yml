@@ -45,7 +45,7 @@ jobs:
       # The badge in the README reads from here; without an upload it would
       # sit at "unknown" forever.
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           files: coverage.out
           fail_ci_if_error: false
