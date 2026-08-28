@@ -113,6 +113,18 @@ Break these and the CLI stops being safe to drive from a program:
   fields DigiKey never sent, which is exactly what the flag exists to avoid.
 - **List commands accept a name or an id.** GUIDs are hostile to both humans and
   agents. `ResolveList` handles it; an ambiguous name is an error, never a guess.
+- **One command, one JSON shape.** A flag may narrow or extend a result, never
+  swap it for a different top-level object — a caller cannot branch on a shape
+  it was not told about. `dk filters --parameter` used to print a bare
+  `ParameterFacet`, so the `parameters` array the guide documents was simply
+  absent and the guide's own recommended loop read it and found nothing. It now
+  returns the same envelope with `parameters` holding the one match. Table
+  output is free to differ — no machine parses it — and does, showing the
+  per-value view instead of the summary row.
+- **Validate before the network.** Anything dk can reject on its own is checked
+  before the first request, so a bad invocation costs no quota. `dk list create`
+  used to run `--auto-rename` — a request, and a full paged `AllLists` walk when
+  DigiKey's validate route 404s — before looking at `--visibility`.
 
 - **Anything that needs a complete list pages for it.** `Lists`/`ListParts` are
   single-page calls; `AllLists`/`AllListParts` page until a request returns
@@ -647,7 +659,11 @@ assumed, so prefer it when changing list pricing:
   types as short codes (`CT`, `DKR`, `TR`, and `BAG` for a part that ships in
   one, seen live on `WK-KIT-ND`) while Product Information uses
   `Cut Tape (CT)`, `Digi-Reel®`, `Tape & Reel (TR)`. The two vocabularies do
-  not overlap. See `testdata/listparts_priced.json`.
+  not overlap. See `testdata/listparts_priced.json`. This cuts both ways:
+  `dk list add --packaging` writes straight into `SelectedPackType`, so its help
+  names the MyLists codes. It advertised `"Cut Tape"` and `"Tape & Reel"` for a
+  while, which matched nothing — and DigiKey does not reject an unknown pack
+  type, it ignores it, so the preference vanished without an error.
 - **`PackOptions` was an empty array** for an Obsolete, zero-stock part. There
   is no price anywhere on such a line, which is why it must read as *unpriced*
   (`unpriced_parts`) rather than free — a zero total that looks like a bargain

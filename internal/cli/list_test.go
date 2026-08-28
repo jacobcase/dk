@@ -250,6 +250,23 @@ func TestListCreateRejectsBadVisibility(t *testing.T) {
 	}
 }
 
+// --auto-rename costs a request, and a full paged walk of the account's lists
+// when DigiKey's validate route 404s. A flag dk can reject on its own must be
+// rejected before any of that.
+func TestListCreateRejectsBadVisibilityBeforeAnyRequest(t *testing.T) {
+	m := newMockDigiKey(t)
+
+	res := runAuthed(t, m, "list", "create", "Bench PSU", "--auto-rename", "--visibility", "public")
+	if res.Code != ExitUsage {
+		t.Fatalf("exit code = %d, want %d\nstderr: %s", res.Code, ExitUsage, res.Stderr)
+	}
+	for _, r := range m.requests {
+		if strings.HasPrefix(r.Path, "/mylists/") {
+			t.Errorf("an invalid flag reached the API: %s %s", r.Method, r.Path)
+		}
+	}
+}
+
 func TestListShow(t *testing.T) {
 	m := newMockDigiKey(t)
 	m.handle("GET", "/mylists/v1/lists", http.StatusOK, listsBody)
@@ -587,6 +604,38 @@ func TestListRemoveByUniqueID(t *testing.T) {
 	res := runAuthed(t, m, "list", "rm", "aaa-111", "uid-2")
 	if res.Code != ExitOK {
 		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+}
+
+// One line answers to several names — the fixture's uid-1 to both its DigiKey
+// part number and its manufacturer part number — so two targets can resolve to
+// the same id. Deleting it twice would draw a 404 on the second call and fail a
+// removal that in fact succeeded.
+func TestListRemoveDeletesEachLineOnce(t *testing.T) {
+	m := newMockDigiKey(t)
+	m.handle("GET", "/mylists/v1/lists", http.StatusOK, listsBody)
+	m.handle("GET", "/mylists/v1/lists/aaa-111/parts", http.StatusOK, listPartsBody)
+	m.handle("DELETE", "/mylists/v1/lists/aaa-111/parts/uid-1", http.StatusNoContent, "")
+
+	res := runAuthed(t, m, "list", "rm", "aaa-111", "490-1532-1-ND", "GRM188R71C104KA01D")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+
+	deletes := 0
+	for _, r := range m.requests {
+		if r.Method == http.MethodDelete {
+			deletes++
+		}
+	}
+	if deletes != 1 {
+		t.Errorf("sent %d deletes for one line, want 1", deletes)
+	}
+
+	var got map[string]any
+	res.JSON(t, &got)
+	if got["removed"] != float64(1) {
+		t.Errorf("removed = %v, want 1", got["removed"])
 	}
 }
 

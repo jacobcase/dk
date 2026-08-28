@@ -117,21 +117,35 @@ pin it explicitly.`,
 
 			result := buildFiltersResult(keywords, resp.ProductsCount, facets)
 
-			// Drilling into one parameter is the second half of the loop: the
-			// overview caps each value list, this shows one in full.
+			// Drilling into one parameter narrows this envelope rather than
+			// replacing it. Printing the bare facet was a second top-level
+			// shape with no "query", "total_matches" or "parameters" key, and
+			// nothing said so — the guide documents one shape and lists
+			// --parameter as an ordinary flag beside --category, so a caller
+			// reading .parameters after the drill-down found nothing and
+			// concluded the parameter had no values. Keeping the array, with
+			// the one match in it, means a single JSON path reads both halves
+			// of the discovery loop.
+			//
+			// Table output still switches to the per-value view: that is the
+			// half a human reads, and no machine parses it.
+			var table *output.Table
 			if parameter != "" {
 				facet, err := findParameterFacet(result.Parameters, parameter)
 				if err != nil {
 					return err
 				}
-				return app.Printer.Print(facet, parameterValuesTable(*facet))
+				result.Parameters = []ParameterFacet{*facet}
+				table = parameterValuesTable(*facet)
+			} else {
+				limit := maxValues
+				if allValues {
+					limit = 0
+				}
+				table = parametersTableFor(result, limit)
 			}
 
-			limit := maxValues
-			if allValues {
-				limit = 0
-			}
-			if err := app.Printer.Print(result, parametersTableFor(result, limit)); err != nil {
+			if err := app.Printer.Print(result, table); err != nil {
 				return err
 			}
 
@@ -139,7 +153,11 @@ pin it explicitly.`,
 				app.Printer.PrintText("\nCategory: %s (id %d)", result.Category.Name, result.Category.ID)
 			}
 			app.Printer.PrintText("%d products match %q.", result.TotalMatches, keywords)
-			if len(result.Parameters) > 0 {
+			switch {
+			case parameter != "":
+				app.Printer.PrintText("Apply it with `dk search %q --param \"%s=<value>\"`.",
+					keywords, result.Parameters[0].ParameterName)
+			case len(result.Parameters) > 0:
 				app.Printer.PrintText("Drill into one with `dk filters %q --parameter <name>`, "+
 					"then apply it with `dk search %q --param \"<name>=<value>\"`.", keywords, keywords)
 			}

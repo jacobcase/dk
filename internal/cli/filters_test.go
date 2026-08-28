@@ -140,13 +140,23 @@ func TestFiltersDrillIntoParameter(t *testing.T) {
 		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
 	}
 
-	var got ParameterFacet
+	// The drill-down narrows the documented envelope rather than replacing it,
+	// so one JSON path reads both halves of the discovery loop.
+	var got FiltersResult
 	res.JSON(t, &got)
-	if got.ParameterName != "Tolerance" {
-		t.Errorf("parameter_name = %q", got.ParameterName)
+	if got.Query != "capacitor" || got.TotalMatches == 0 {
+		t.Errorf("query = %q, total_matches = %d: the drill-down must keep the envelope",
+			got.Query, got.TotalMatches)
 	}
-	if len(got.Values) != 2 {
-		t.Errorf("got %d values, want 2", len(got.Values))
+	if len(got.Parameters) != 1 {
+		t.Fatalf("got %d parameters, want 1: --parameter filters the array, it does not replace the shape",
+			len(got.Parameters))
+	}
+	if got.Parameters[0].ParameterName != "Tolerance" {
+		t.Errorf("parameter_name = %q", got.Parameters[0].ParameterName)
+	}
+	if len(got.Parameters[0].Values) != 2 {
+		t.Errorf("got %d values, want 2", len(got.Parameters[0].Values))
 	}
 }
 
@@ -158,10 +168,13 @@ func TestFiltersDrillByParameterID(t *testing.T) {
 	if res.Code != ExitOK {
 		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
 	}
-	var got ParameterFacet
+	var got FiltersResult
 	res.JSON(t, &got)
-	if got.ParameterID != 2049 {
-		t.Errorf("parameter_id = %d, want 2049", got.ParameterID)
+	if len(got.Parameters) != 1 {
+		t.Fatalf("got %d parameters, want 1", len(got.Parameters))
+	}
+	if got.Parameters[0].ParameterID != 2049 {
+		t.Errorf("parameter_id = %d, want 2049", got.Parameters[0].ParameterID)
 	}
 }
 

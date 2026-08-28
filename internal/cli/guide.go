@@ -49,6 +49,12 @@ RESPONSE CACHE
     dk cache status   where the entries live and how many are held
     dk cache clear    delete all of them
 
+  "dk auth login" and "dk auth logout" also empty the cache, because entries
+  written under one account cannot be told from the next account's. That clear
+  is not scoped to the active environment: logging in to the sandbox discards
+  the production entries too. Expect the first reads after any login to go to
+  the API.
+
   Stock and price move, and an entry may be up to the TTL old. Pass --no-cache
   before quoting a figure a human is about to act on.
 
@@ -161,6 +167,10 @@ PARAMETRIC FILTERING
                  "values":[{"value_id","value_name","product_count",
                  "range_type"}]}],"manufacturers","packaging","status","series"}
 
+  --parameter narrows that same shape rather than returning a different one:
+  "parameters" comes back holding the one match, with every value present
+  instead of the table's capped list. Read .parameters[0].values either way.
+
   Rules that matter:
   - product_count on each value tells you how much that choice narrows the
     search. Use it to pick a filter that actually helps.
@@ -228,7 +238,7 @@ WHAT ELSE DO I NEED TO BUY?
   Most parts have no associations; an empty result is normal, not an error.
 
 COSTING A QUANTITY
-  dk pricing <part-number> --qty N [--packaging CT|DKR]
+  dk pricing <part-number> --qty N [--packaging CT|TR|DKR]
 
   Answers "I need N of these — what do I order and what does it cost?" Returns
   every way DigiKey will sell that quantity.
@@ -318,6 +328,7 @@ LISTS
                                               parts with live pricing and stock
   dk list add <list> <part[:qty]>... [--qty N] [--ref R1,R2] [--note TEXT]
                                               [--from-json FILE|-] [--verify]
+                                              [--packaging CT|TR|DKR|BAG]
   dk list set <list> <unique-id-or-part> [--qty N] [--ref R] [--note TEXT]
                                               [--customer-ref C]
   dk list rm <list> <unique-id-or-part>...
@@ -329,6 +340,16 @@ LISTS
   <list> is a list NAME or a list ID. Names match exactly first, then
   case-insensitively; an ambiguous name is an error (code "ambiguous_list")
   with the candidate ids in .error.details.candidates.
+
+  "dk list add --packaging" takes MyLists' short codes, not the names
+  "dk pricing" and "dk product" print: CT, TR, DKR, BAG, never "Cut Tape (CT)".
+  The two APIs spell the same pack types differently and DigiKey does not
+  reject an unknown one, it ignores it.
+
+  A line answers to its unique id, its DigiKey part number, the number
+  originally requested, the manufacturer's, and any pack option's number, so
+  two "dk list rm" targets can name the same line. It is removed once and the
+  repeat is reported in .results with a reason, not counted again in .removed.
 
   "dk list show" and "dk list export" page through the whole list, so
   estimated_total and the exported rows cover all of it. Passing --limit or

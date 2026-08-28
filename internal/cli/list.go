@@ -538,6 +538,18 @@ variant instead of failing, which is useful in unattended runs.`,
 				return usageErrorf("list name must not be empty")
 			}
 
+			// Validated before anything reaches the network: --auto-rename can
+			// cost a request and, when DigiKey's validate route 404s, a full
+			// paged walk of the account's lists. A bad flag must cost neither.
+			var settings *digikey.ListSettings
+			if visibility != "" {
+				v, err := normalizeVisibility(visibility)
+				if err != nil {
+					return err
+				}
+				settings = &digikey.ListSettings{Visibility: v}
+			}
+
 			ctx := cmd.Context()
 			client, err := app.Client()
 			if err != nil {
@@ -554,13 +566,11 @@ variant instead of failing, which is useful in unattended runs.`,
 				}
 			}
 
-			req := digikey.CreateListRequest{ListName: name, Tags: tags, Source: "external"}
-			if visibility != "" {
-				v, err := normalizeVisibility(visibility)
-				if err != nil {
-					return err
-				}
-				req.ListSettings = &digikey.ListSettings{Visibility: v}
+			req := digikey.CreateListRequest{
+				ListName:     name,
+				Tags:         tags,
+				Source:       "external",
+				ListSettings: settings,
 			}
 
 			id, err := client.CreateList(ctx, req)
@@ -919,7 +929,12 @@ the ones that do not resolve.`,
 	f.StringVar(&ref, "ref", "", "reference designators for the part, e.g. \"C1,C2,C3\" (single part only)")
 	f.StringVar(&custRef, "customer-ref", "", "your own part reference (single part only)")
 	f.StringVar(&note, "note", "", "free-text note attached to the line (single part only)")
-	f.StringVar(&packaging, "packaging", "", "preferred pack type, e.g. \"Cut Tape\" or \"Tape & Reel\"")
+	// MyLists' codes, not Product Information's names. SelectedPackType is
+	// matched against PackOptions[].PackType, which DigiKey spells "CT", "TR",
+	// "DKR", "BAG" here and "Cut Tape (CT)", "Tape & Reel (TR)" on the product
+	// side. Naming the product-side vocabulary here matched nothing and the
+	// preference was dropped without an error.
+	f.StringVar(&packaging, "packaging", "", "preferred pack type: CT, TR, DKR or BAG")
 	f.StringVar(&fromJSON, "from-json", "", "read parts from a JSON file, or \"-\" for stdin")
 	f.BoolVar(&verify, "verify", false, "check each part exists in the catalog before adding, skipping any that do not")
 	return cmd
@@ -1116,6 +1131,15 @@ a part number as it appears in the list:
 			// — a rate limit has to surface as 5, not as a successful run.
 			var firstErr error
 
+			// One line answers to as many as five names — its unique id, its
+			// DigiKey part number, the number originally requested, the
+			// manufacturer's, and any pack option's — and those differ
+			// routinely. Two targets naming the same line would otherwise
+			// issue two deletes for one id, and the second, against an id
+			// that no longer exists, would set firstErr and fail a removal
+			// that in fact succeeded.
+			seen := make(map[string]bool, len(parts.PartsList))
+
 			for _, target := range args[1:] {
 				uniqueIDs := matchListEntries(parts.PartsList, target)
 				if len(uniqueIDs) == 0 {
@@ -1123,6 +1147,15 @@ a part number as it appears in the list:
 					continue
 				}
 				for _, uid := range uniqueIDs {
+					if seen[uid] {
+						results = append(results, removal{
+							Target:   target,
+							UniqueID: uid,
+							Reason:   "already removed by an earlier target naming the same line",
+						})
+						continue
+					}
+					seen[uid] = true
 					if err := client.DeletePart(ctx, summary.ID, uid); err != nil {
 						if firstErr == nil {
 							firstErr = err
