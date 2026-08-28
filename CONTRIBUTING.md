@@ -324,8 +324,8 @@ must come from the same variation or pack option.
 
 ## Settled against the live API — do not reopen
 
-Two fields look like they should be modeled and are not. Both were tested
-against the real API on 2026-08-27; the answers are counterintuitive enough
+Three fields look like they carry the answer and do not. Tested against the
+real API on 2026-08-27 and 2026-08-28; the answers are counterintuitive enough
 that they get written down rather than rediscovered.
 
 - **`ListPartQuantity.IsInactive` must not gate pricing.** The obvious reading
@@ -371,20 +371,6 @@ that they get written down rather than rediscovered.
   after `Tolerance=±10%` cut it to 192,092. The whole payload carries no other
   applied-filter signal; `SearchLocaleUsed` is the only "what did you actually
   use" field on the response. There is nothing to model.
-
-One more, tested 2026-08-28, on the environment split rather than on a field.
-
-- **A production client id is rejected by the sandbox host.** The credentials
-  are not shared between deployments and there is no "enable sandbox" toggle
-  that makes them work. `dk categories` against `sandbox-api.digikey.com`, using
-  a client id that had just succeeded against `api.digikey.com` on the same
-  command, failed the OAuth exchange with `401 Unauthorized: clientId invalid
-  for requested resource`. The sandbox therefore needs its own registered app,
-  which is why credentials are stored per environment
-  (`credentials-<environment>.json`) rather than once. Do not "simplify" that
-  back into one credential pair, and do not add a fallback that lends one
-  environment's client id to the other: the result is a 401 whose message points
-  at the credentials rather than at the host, which is the harder bug to read.
 
 Four more, tested 2026-08-28. The last three are negative results — probes that
 came back clean — and they are here so the next review does not propose guards
@@ -606,7 +592,13 @@ short-lived self-signed certificate for the loopback listener rather than
 serving plain HTTP.
 
 Both token kinds are cached per environment, and so are the credentials that
-mint them — see the sandbox entry under "Settled against the live API". The
+mint them: DigiKey issues a client id against one deployment, and its developer
+portal registers a sandbox app separately from a production one, so expect a
+caller to hold two unrelated pairs rather than one that works in both places.
+Do not "simplify" that back into a single pair, and do not add a fallback that
+lends one environment's client id to the other — the failure surfaces as an
+auth error naming the credentials when the real problem is the host, which is
+the harder bug to read. The
 config package splits one flat `Config` across two files on write: shared
 settings to `config.json`, the four app-identity fields to
 `credentials-<environment>.json`. `Save` rewrites both; `SaveEnvironment`

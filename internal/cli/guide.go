@@ -102,8 +102,8 @@ ENVIRONMENT
       dk env sandbox            -> switch (persists until changed)
 
   Each environment has its own credentials, because DigiKey scopes a client id
-  to one deployment: a production client id sent to the sandbox host fails with
-  "clientId invalid for requested resource". Cached tokens are per environment
+  to one deployment and registers a sandbox app separately from a production
+  one. Expect to hold two unrelated pairs. Cached tokens are per environment
   too, so switching back does not require logging in again.
 
   Sandbox data is not real. Do not report its part numbers, stock, or prices as

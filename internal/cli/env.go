@@ -45,10 +45,11 @@ func newEnvCommand(app *App) *cobra.Command {
 
 The environment is persistent state, not a per-command flag: it is stored in
 the config file and stays in effect until changed. Each environment keeps its
-own credentials file, because DigiKey scopes a client id to one deployment —
-a production client id is rejected by the sandbox host with "clientId invalid
-for requested resource". Switching environments therefore switches credentials
-too, and neither set overwrites the other.
+own credentials file, because DigiKey scopes a client id to one deployment:
+its developer portal registers a sandbox app separately from a production one,
+so the two are unrelated credential pairs rather than one that works in both
+places. Switching environments therefore switches credentials too, and neither
+set overwrites the other.
 
 Cached tokens are already kept per environment, so switching back does not
 require logging in again.`,

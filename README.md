@@ -404,9 +404,9 @@ the one the next command will use, which would not be true if a variable in one
 shell could quietly disagree.
 
 **Each environment needs its own registered app.** DigiKey scopes a client id to
-a single deployment — a production client id sent to `sandbox-api.digikey.com`
-is rejected with `clientId invalid for requested resource`, not served with
-sandbox data. So register a second app for the sandbox, give it the same
+a single deployment, and its developer portal registers a sandbox app separately
+from a production one — a production client id is not served sandbox data. So
+register a second app for the sandbox, give it the same
 callback URL, and store its credentials while the sandbox is active:
 
 ```
