@@ -74,6 +74,14 @@ Break these and the CLI stops being safe to drive from a program:
   recognizes) so the exit code and the JSON `error.code` stay in sync. A new
   failure mode needs a code in `errors.go` *and* a line in `guide.go`; a test
   enforces the latter.
+- **The environment is persistent state, not an override.** Which DigiKey
+  deployment dk talks to comes from `config.json` and is changed only by
+  `dk env`. There is deliberately no `--env` flag and no `DIGIKEY_ENV`: `dk env`
+  and `dk auth status` report the environment, and a per-run override would make
+  those reports advisory — a caller could read "production" and have the next
+  command hit the sandbox. It also decides which credentials file is read, so an
+  override would have to redirect a write as well as a read. If you are tempted
+  to add one back, the thing to add instead is a clearer error.
 - **Commands take `*App`, not globals.** That is what lets the whole CLI run
   in-process against an `httptest` server. Do not reach for package state.
 - **`ProductView` is a deliberate flattening.** DigiKey's `Product` hides the
@@ -306,6 +314,20 @@ that they get written down rather than rediscovered.
   applied-filter signal; `SearchLocaleUsed` is the only "what did you actually
   use" field on the response. There is nothing to model.
 
+One more, tested 2026-08-28, on the environment split rather than on a field.
+
+- **A production client id is rejected by the sandbox host.** The credentials
+  are not shared between deployments and there is no "enable sandbox" toggle
+  that makes them work. `dk categories` against `sandbox-api.digikey.com`, using
+  a client id that had just succeeded against `api.digikey.com` on the same
+  command, failed the OAuth exchange with `401 Unauthorized: clientId invalid
+  for requested resource`. The sandbox therefore needs its own registered app,
+  which is why credentials are stored per environment
+  (`credentials-<environment>.json`) rather than once. Do not "simplify" that
+  back into one credential pair, and do not add a fallback that lends one
+  environment's client id to the other: the result is a 401 whose message points
+  at the credentials rather than at the host, which is the harder bug to read.
+
 Four more, tested 2026-08-28. The last three are negative results — probes that
 came back clean — and they are here so the next review does not propose guards
 for shapes DigiKey does not produce.
@@ -478,6 +500,24 @@ returns account-specific pricing.
 DigiKey rejects non-HTTPS redirect URIs, which is why `auth/callback.go` mints a
 short-lived self-signed certificate for the loopback listener rather than
 serving plain HTTP.
+
+Both token kinds are cached per environment, and so are the credentials that
+mint them — see the sandbox entry under "Settled against the live API". The
+config package splits one flat `Config` across two files on write: shared
+settings to `config.json`, the four app-identity fields to
+`credentials-<environment>.json`. `Save` rewrites both; `SaveEnvironment`
+touches only the pointer, because switching environments must never rewrite the
+credentials of the one being left. Credentials found at the top level of
+`config.json` are read as a fallback for the environment that file names — the
+pre-split layout — and are dropped the first time anything is written.
+
+That fallback is keyed on the environment `config.json` currently names, which
+is why `SaveEnvironment` extracts those credentials into that environment's own
+file *before* it moves the pointer. Without the extraction the switch does not
+lose them, it reassigns them: the next read finds the same top-level keys under
+a file now naming the sandbox, and a production client secret is written into
+`credentials-sandbox.json` on the next `dk config set`. Regression tests cover
+the whole sequence.
 ## API schema reference
 
 Field names come from DigiKey's OpenAPI specs and are PascalCase; a lowercase key

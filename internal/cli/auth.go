@@ -58,7 +58,11 @@ DigiKey uses two OAuth flows, and dk uses both:
 
 Credentials come from DIGIKEY_CLIENT_ID / DIGIKEY_CLIENT_SECRET or from
 "dk config set". Register an app at https://developer.digikey.com and subscribe
-it to both "Product Information" and "MyLists".`,
+it to both "Product Information" and "MyLists".
+
+Credentials and cached tokens are both per environment: DigiKey scopes a client
+id to one deployment, so the sandbox needs its own registered app and its own
+login. Run "dk env" to see which environment these commands will act on.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return cmd.Help()
 		},
@@ -307,6 +311,7 @@ type AuthStatus struct {
 	HasRefreshToken    bool   `json:"has_refresh_token"`
 	TokenFile          string `json:"token_file,omitempty"`
 	ConfigFile         string `json:"config_file,omitempty"`
+	CredentialsFile    string `json:"credentials_file,omitempty"`
 	RedirectURI        string `json:"redirect_uri,omitempty"`
 }
 
@@ -315,7 +320,9 @@ func newAuthStatusCommand(app *App) *cobra.Command {
 		Use:   "status",
 		Short: "Show credential and token status",
 		Long: `Report which credentials are configured and whether a list-capable token is
-cached. Exits 0 regardless of state; read "user_logged_in" to decide whether
+cached, for the environment that is currently active — "environment" in the
+output names it, and everything below it describes that environment alone.
+Exits 0 regardless of state; read "user_logged_in" to decide whether
 "dk auth login" is still needed.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -328,6 +335,9 @@ cached. Exits 0 regardless of state; read "user_logged_in" to decide whether
 			}
 			if path, err := config.Path(); err == nil {
 				status.ConfigFile = path
+			}
+			if path, err := config.CredentialsPath(app.Cfg.Environment); err == nil {
+				status.CredentialsFile = path
 			}
 
 			store, err := app.Store()
@@ -358,6 +368,7 @@ cached. Exits 0 regardless of state; read "user_logged_in" to decide whether
 				{"user token expires", status.UserTokenExpiresAt},
 				{"refresh token stored", fmt.Sprintf("%t", status.HasRefreshToken)},
 				{"config file", status.ConfigFile},
+				{"credentials file", status.CredentialsFile},
 				{"token file", status.TokenFile},
 			})
 			if err := app.Printer.Print(status, t); err != nil {
@@ -366,7 +377,7 @@ cached. Exits 0 regardless of state; read "user_logged_in" to decide whether
 
 			switch {
 			case !status.ClientIDSet || !status.ClientSecretSet:
-				app.Printer.PrintText("\nNext: set credentials with `dk config set client_id <id>` and `dk config set client_secret <secret>`.")
+				app.Printer.PrintText(fmt.Sprintf("\nNext: set credentials for the %s environment with `dk config set client_id <id>`\nand `dk config set client_secret <secret>`. Switch environments with `dk env`.", status.Environment))
 			case !status.UserLoggedIn:
 				app.Printer.PrintText("\nSearch works now. Run `dk auth login` to enable `dk list` commands.")
 			}

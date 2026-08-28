@@ -90,6 +90,24 @@ AUTHENTICATION
 
   Check before starting work:
       dk auth status --output json     -> .user_logged_in tells you if lists work
+                                       -> .environment tells you which DigiKey
+                                          deployment every command will hit
+
+ENVIRONMENT
+  dk talks to one DigiKey deployment at a time, production or sandbox. It is
+  persistent state, not a per-command flag, and there is no way to override it
+  for a single call:
+      dk env                    -> the active environment
+      dk env list               -> both, and which has credentials
+      dk env sandbox            -> switch (persists until changed)
+
+  Each environment has its own credentials, because DigiKey scopes a client id
+  to one deployment: a production client id sent to the sandbox host fails with
+  "clientId invalid for requested resource". Cached tokens are per environment
+  too, so switching back does not require logging in again.
+
+  Sandbox data is not real. Do not report its part numbers, stock, or prices as
+  fact. Before quoting any figure, confirm .environment is "production".
 
 SEARCH
   dk search <keywords...> [--limit N] [--offset N] [--in-stock] [--sort price]

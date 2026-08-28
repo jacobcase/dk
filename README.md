@@ -68,7 +68,10 @@ dk config set client_id <id>
 dk config set client_secret <secret>
 ```
 
-`dk config path` prints where the config and token files live.
+`dk config path` prints where the config, credentials, and token files live.
+Credentials belong to one environment — the commands above store them for
+whichever is active, production unless you have switched. See
+[Environments](#environments).
 
 ### 3. Log in (only needed for lists)
 
@@ -131,6 +134,7 @@ dk list delete <list>         delete (needs --force if non-empty)
 dk list export <list>         BOM-shaped output, pairs with --output csv
 
 dk auth login|status|logout   authentication
+dk env [production|sandbox]   show or switch the active environment
 dk config show|set|path       configuration
 dk cache status|clear         cached API responses
 dk guide                      condensed reference for scripts and agents
@@ -383,26 +387,70 @@ Branch on `.error.code`, not on the message text. Codes: `usage_error`,
 `cancelled` is Ctrl-C or SIGTERM, which exits 1 — distinguishable from a
 genuine failure by the code. A second Ctrl-C force-quits.
 
+## Environments
+
+dk talks to one DigiKey deployment at a time:
+
+```
+dk env                  which environment is active
+dk env list             both, and which has credentials
+dk env sandbox          switch (persists until you change it back)
+dk env prod             switch back
+```
+
+This is persistent state, not a per-command flag. There is no `--env` and no
+`DIGIKEY_ENV`: the environment `dk env` and `dk auth status` report is always
+the one the next command will use, which would not be true if a variable in one
+shell could quietly disagree.
+
+**Each environment needs its own registered app.** DigiKey scopes a client id to
+a single deployment — a production client id sent to `sandbox-api.digikey.com`
+is rejected with `clientId invalid for requested resource`, not served with
+sandbox data. So register a second app for the sandbox, give it the same
+callback URL, and store its credentials while the sandbox is active:
+
+```
+dk env sandbox
+dk config set client_id <sandbox id>
+dk config set client_secret <sandbox secret>
+dk auth login                          # only if you need lists
+```
+
+Credentials live in a separate file per environment, so neither set overwrites
+the other, and cached tokens are keyed by environment too — switching back does
+not mean logging in again.
+
+Sandbox data is not real. Check `dk env` before trusting a part number, a stock
+figure, or a price.
+
 ## Configuration
 
 Resolution order, highest first:
 
-1. flags (`--client-id`, `--env`, `--site`, `--currency`, ...)
+1. flags (`--client-id`, `--site`, `--currency`, ...)
 2. environment variables
 3. config file (`dk config path`)
 4. built-in defaults
 
-| Key | Env var | Default |
-|---|---|---|
-| `client_id` | `DIGIKEY_CLIENT_ID` | — |
-| `client_secret` | `DIGIKEY_CLIENT_SECRET` | — |
-| `environment` | `DIGIKEY_ENV` | `production` |
-| `redirect_uri` | `DIGIKEY_REDIRECT_URI` | `https://localhost:8139/digikey_callback` |
-| `account_id` | `DIGIKEY_ACCOUNT_ID` | — |
-| `locale.site` | `DIGIKEY_LOCALE_SITE` | `US` |
-| `locale.language` | `DIGIKEY_LOCALE_LANGUAGE` | `en` |
-| `locale.currency` | `DIGIKEY_LOCALE_CURRENCY` | `USD` |
-| `cache_ttl` | `DK_CACHE_TTL` | `10m` |
+| Key | Env var | Scope | Default |
+|---|---|---|---|
+| `client_id` | `DIGIKEY_CLIENT_ID` | per environment | — |
+| `client_secret` | `DIGIKEY_CLIENT_SECRET` | per environment | — |
+| `redirect_uri` | `DIGIKEY_REDIRECT_URI` | per environment | `https://localhost:8139/digikey_callback` |
+| `account_id` | `DIGIKEY_ACCOUNT_ID` | per environment | — |
+| `locale.site` | `DIGIKEY_LOCALE_SITE` | shared | `US` |
+| `locale.language` | `DIGIKEY_LOCALE_LANGUAGE` | shared | `en` |
+| `locale.currency` | `DIGIKEY_LOCALE_CURRENCY` | shared | `USD` |
+| `cache_ttl` | `DK_CACHE_TTL` | shared | `10m` |
+
+The environment itself is not in the table because it is not a setting you
+override per run: it is changed with `dk env` and has no variable and no flag.
+See [Environments](#environments).
+
+Per-environment keys are stored in `credentials-<environment>.json` and the
+shared ones in `config.json`. `dk config set` writes to whichever environment is
+active, so run `dk env` first if you are not sure which that is; `dk config path`
+prints both files.
 
 Config and the token cache live in `$XDG_CONFIG_HOME/dk`, defaulting to
 `~/.config/dk` — including on macOS, alongside the other command-line tools,

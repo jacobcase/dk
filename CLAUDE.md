@@ -11,6 +11,9 @@ Two rules that matter regardless:
 
 - **dk never places an order.** It stages lists for a human to review and buy.
   Do not claim a part has been ordered.
+- **Check `dk env` before quoting a figure.** dk talks to production or the
+  sandbox, and sandbox data is not real. There is no per-command override, so
+  what `dk env` reports is what every command in that session used.
 - **You cannot run `dk auth login`** — it needs a browser. If dk exits 3 with
   `auth_required`, stop and ask the human to run it once.
 
@@ -21,8 +24,9 @@ cmd/dk/            main; just calls cli.Main()
 internal/cli/      cobra command tree, output views, error classification
 internal/digikey/  typed client for Product Information v4 and MyLists v1
 internal/auth/     both OAuth flows, token cache, HTTPS callback listener
-internal/config/   config file + env resolution (~/.config/dk, XDG not
-                   os.UserConfigDir — see Dir())
+internal/config/   shared config.json + per-environment credentials files +
+                   env-var resolution (~/.config/dk, XDG not os.UserConfigDir —
+                   see Dir())
 internal/cache/    on-disk response cache, keyed per token/locale/query
 internal/output/   json / table / csv rendering
 internal/atomicfile/  crash-safe file replacement, shared by config, auth, and

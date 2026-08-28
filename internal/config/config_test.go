@@ -117,7 +117,6 @@ func TestLoadEnvOverridesFile(t *testing.T) {
 		t.Fatalf("Save() error = %v", err)
 	}
 	t.Setenv("DIGIKEY_CLIENT_ID", "from-env")
-	t.Setenv("DIGIKEY_ENV", EnvSandbox)
 
 	cfg, err := Load()
 	if err != nil {
@@ -130,8 +129,34 @@ func TestLoadEnvOverridesFile(t *testing.T) {
 	if cfg.ClientSecret != "file-secret" {
 		t.Errorf("ClientSecret = %q, want the file value %q", cfg.ClientSecret, "file-secret")
 	}
-	if cfg.Environment != EnvSandbox {
-		t.Errorf("Environment = %q, want %q", cfg.Environment, EnvSandbox)
+}
+
+// The active environment is persistent state owned by `dk env`. No variable may
+// redirect it, or `dk env` and `dk auth status` would report an environment
+// that the next command in a differently-configured shell does not use.
+func TestLoadIgnoresDigikeyEnvVariable(t *testing.T) {
+	withConfigDir(t)
+
+	if err := Save(Config{ClientID: "prod-id", ClientSecret: "prod-secret", Environment: EnvProduction}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	t.Setenv("DIGIKEY_ENV", EnvSandbox)
+	t.Setenv("DIGIKEY_ENVIRONMENT", EnvSandbox)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Environment != EnvProduction {
+		t.Errorf("Environment = %q, want %q: DIGIKEY_ENV must not switch environments", cfg.Environment, EnvProduction)
+	}
+	if cfg.BaseURL() != ProductionBaseURL {
+		t.Errorf("BaseURL() = %q, want %q: the host must follow the stored environment", cfg.BaseURL(), ProductionBaseURL)
+	}
+	// The credentials must come from the stored environment too, or the
+	// variable would have swapped the host's credentials without the host.
+	if cfg.ClientID != "prod-id" {
+		t.Errorf("ClientID = %q, want %q", cfg.ClientID, "prod-id")
 	}
 }
 
@@ -214,27 +239,257 @@ func TestSaveIsAtomicOverwrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	// The client id is per environment, so it is the credentials file that has
+	// to have been overwritten cleanly.
+	data, err := os.ReadFile(filepath.Join(dir, "credentials-production.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cfg Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	var creds Config
+	if err := json.Unmarshal(data, &creds); err != nil {
 		t.Fatalf("second write produced unparseable json: %v", err)
 	}
-	if cfg.ClientID != "second" {
-		t.Errorf("ClientID = %q, want %q", cfg.ClientID, "second")
+	if creds.ClientID != "second" {
+		t.Errorf("ClientID = %q, want %q", creds.ClientID, "second")
 	}
 
-	// The temporary file used for the atomic rename must not be left behind.
+	// The temporary files used for the atomic renames must not be left behind.
+	written := map[string]bool{"config.json": true, "credentials-production.json": true}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if e.Name() != "config.json" {
+		if !written[e.Name()] {
 			t.Errorf("unexpected leftover file %q in config dir", e.Name())
 		}
+	}
+}
+
+// Save splits one Config across two files; both have to be unreadable to anyone
+// else, since the credentials file is where the secret actually lands.
+func TestSaveWritesBothFiles0600(t *testing.T) {
+	dir := withConfigDir(t)
+
+	if err := Save(Config{ClientID: "id", ClientSecret: "secret", Environment: EnvSandbox}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"config.json", "credentials-sandbox.json"} {
+		info, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("%s mode = %#o, want 0600", name, perm)
+		}
+	}
+}
+
+// Each environment's credentials are separate on disk. DigiKey rejects a
+// production client id sent to the sandbox host, so a switch that carried
+// credentials across would produce a confusing 401 rather than a clear
+// "no credentials for this environment".
+func TestCredentialsAreNotSharedBetweenEnvironments(t *testing.T) {
+	withConfigDir(t)
+
+	if err := Save(Config{Environment: EnvProduction, ClientID: "prod-id", ClientSecret: "prod-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(Config{Environment: EnvSandbox, ClientID: "sbx-id", ClientSecret: "sbx-secret"}); err != nil {
+		t.Fatal(err)
+	}
+
+	prod, err := LoadEnvironment(EnvProduction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prod.ClientID != "prod-id" || prod.ClientSecret != "prod-secret" {
+		t.Errorf("production credentials = %q/%q, want prod-id/prod-secret: the sandbox write overwrote them", prod.ClientID, prod.ClientSecret)
+	}
+
+	sbx, err := LoadEnvironment(EnvSandbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sbx.ClientID != "sbx-id" {
+		t.Errorf("sandbox ClientID = %q, want %q", sbx.ClientID, "sbx-id")
+	}
+	if sbx.BaseURL() != SandboxBaseURL {
+		t.Errorf("sandbox BaseURL() = %q, want %q", sbx.BaseURL(), SandboxBaseURL)
+	}
+}
+
+// SaveEnvironment switches the pointer only. Rewriting credentials on a switch
+// would be a way to lose the ones belonging to the environment being left.
+func TestSaveEnvironmentLeavesCredentialsAlone(t *testing.T) {
+	withConfigDir(t)
+
+	if err := Save(Config{Environment: EnvProduction, ClientID: "prod-id", ClientSecret: "prod-secret", Locale: Locale{Currency: "EUR"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveEnvironment(EnvSandbox); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Environment != EnvSandbox {
+		t.Errorf("Environment = %q, want %q", cfg.Environment, EnvSandbox)
+	}
+	if cfg.ClientID != "" {
+		t.Errorf("ClientID = %q, want empty: the sandbox has no credentials of its own yet", cfg.ClientID)
+	}
+	// Shared settings must survive a switch; only the pointer changed.
+	if cfg.Locale.Currency != "EUR" {
+		t.Errorf("Locale.Currency = %q, want %q", cfg.Locale.Currency, "EUR")
+	}
+
+	prod, err := LoadEnvironment(EnvProduction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prod.ClientID != "prod-id" {
+		t.Errorf("production ClientID = %q, want %q: switching away destroyed it", prod.ClientID, "prod-id")
+	}
+}
+
+// A config.json written by the single-file layout still has credentials at the
+// top level. They belong to the environment that file names, and must not be
+// handed to the other one.
+func TestLegacySingleFileCredentialsAreAdoptedByTheirEnvironmentOnly(t *testing.T) {
+	dir := withConfigDir(t)
+
+	legacy := `{"client_id":"legacy-id","client_secret":"legacy-secret","environment":"production","account_id":"42"}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ClientID != "legacy-id" || cfg.ClientSecret != "legacy-secret" {
+		t.Errorf("credentials = %q/%q, want legacy-id/legacy-secret: an existing install lost its login", cfg.ClientID, cfg.ClientSecret)
+	}
+	if cfg.AccountID != "42" {
+		t.Errorf("AccountID = %q, want %q", cfg.AccountID, "42")
+	}
+
+	sbx, err := LoadEnvironment(EnvSandbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sbx.ClientID != "" {
+		t.Errorf("sandbox ClientID = %q, want empty: production credentials must not leak into the sandbox", sbx.ClientID)
+	}
+}
+
+// The sequence a real upgrade takes: a config.json still in the single-file
+// layout, then a switch to the sandbox, then storing sandbox credentials. The
+// production secret must not follow the pointer into the sandbox's file.
+func TestSwitchingEnvironmentDoesNotReassignLegacyCredentials(t *testing.T) {
+	dir := withConfigDir(t)
+
+	legacy := `{"client_id":"prod-id","client_secret":"prod-secret","environment":"production"}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SaveEnvironment(EnvSandbox); err != nil {
+		t.Fatal(err)
+	}
+
+	sbx, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sbx.ClientID != "" || sbx.ClientSecret != "" {
+		t.Errorf("sandbox credentials = %q/%q, want empty: the production pair was reassigned by the switch", sbx.ClientID, sbx.ClientSecret)
+	}
+
+	// Moved to production's own file rather than dropped, so the login that was
+	// working before the switch still works after switching back.
+	prod, err := LoadEnvironment(EnvProduction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prod.ClientID != "prod-id" || prod.ClientSecret != "prod-secret" {
+		t.Errorf("production credentials = %q/%q, want prod-id/prod-secret: the switch lost them", prod.ClientID, prod.ClientSecret)
+	}
+
+	// And config.json no longer holds the secret at all.
+	raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "prod-secret") {
+		t.Errorf("config.json still holds the client secret after the switch:\n%s", raw)
+	}
+}
+
+// An environment that already has a credentials file is the newer truth; the
+// pre-split fields must not overwrite it on a switch.
+func TestExtractingLegacyCredentialsDoesNotOverwriteAnExistingFile(t *testing.T) {
+	dir := withConfigDir(t)
+
+	if err := Save(Config{Environment: EnvProduction, ClientID: "current-id", ClientSecret: "current-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	// Put stale pre-split keys back alongside the file that supersedes them.
+	stale := `{"environment":"production","client_id":"stale-id","client_secret":"stale-secret"}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SaveEnvironment(EnvSandbox); err != nil {
+		t.Fatal(err)
+	}
+
+	prod, err := LoadEnvironment(EnvProduction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prod.ClientID != "current-id" || prod.ClientSecret != "current-secret" {
+		t.Errorf("production credentials = %q/%q, want current-id/current-secret: stale keys overwrote the real file", prod.ClientID, prod.ClientSecret)
+	}
+}
+
+// Writing anything drops the pre-split credential keys from config.json, so the
+// secret does not linger in a second file after the move.
+func TestSaveDropsLegacyCredentialsFromSharedFile(t *testing.T) {
+	dir := withConfigDir(t)
+
+	legacy := `{"client_id":"legacy-id","client_secret":"legacy-secret","environment":"production"}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "legacy-secret") {
+		t.Errorf("config.json still holds the client secret after a write:\n%s", data)
+	}
+
+	// It moved rather than vanished.
+	reloaded, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.ClientSecret != "legacy-secret" {
+		t.Errorf("ClientSecret = %q, want %q", reloaded.ClientSecret, "legacy-secret")
 	}
 }
 
@@ -247,8 +502,8 @@ func TestSet(t *testing.T) {
 		check   func(Config) bool
 	}{
 		{"client id", "client_id", "abc", false, func(c Config) bool { return c.ClientID == "abc" }},
-		{"env alias", "env", "sandbox", false, func(c Config) bool { return c.Environment == "sandbox" }},
-		{"environment uppercase normalized", "environment", "SANDBOX", false, func(c Config) bool { return c.Environment == "sandbox" }},
+		{"env alias rejected", "env", "sandbox", true, nil},
+		{"environment rejected", "environment", "SANDBOX", true, nil},
 		{"locale dotted", "locale.currency", "EUR", false, func(c Config) bool { return c.Locale.Currency == "EUR" }},
 		{"locale short alias", "currency", "GBP", false, func(c Config) bool { return c.Locale.Currency == "GBP" }},
 		{"key is case insensitive", "CLIENT_ID", "x", false, func(c Config) bool { return c.ClientID == "x" }},

@@ -17,12 +17,18 @@ func newConfigCommand(app *App) *cobra.Command {
 
 Settings resolve in this order, highest first:
 
-  1. command-line flags        --client-id, --env, --site, ...
+  1. command-line flags        --client-id, --site, ...
   2. environment variables     DIGIKEY_CLIENT_ID, DIGIKEY_CLIENT_SECRET, ...
-  3. the config file           ` + "`dk config path`" + `
+  3. the stored files          ` + "`dk config path`" + `
   4. built-in defaults
 
-The config file is written with 0600 permissions because it can hold your client
+Settings are stored in two places. The client id, client secret, redirect URI,
+and account id belong to one registered DigiKey app, so they live in a
+credentials file per environment; everything else is shared. Writes go to
+whichever environment is active — check it with ` + "`dk env`" + ` before setting a
+credential, and switch with ` + "`dk env sandbox`" + ` rather than through this command.
+
+Both files are written with 0600 permissions because one holds your client
 secret. If you would rather not store the secret on disk at all, set
 DIGIKEY_CLIENT_SECRET in the environment instead.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -45,8 +51,9 @@ func newConfigShowCommand(app *App) *cobra.Command {
 		Use:     "show",
 		Aliases: []string{"get", "list"},
 		Short:   "Show the effective configuration",
-		Long:    `Show the configuration as dk resolved it. The client secret is masked unless --reveal is passed.`,
-		Args:    cobra.NoArgs,
+		Long: `Show the configuration as dk resolved it, for the environment that is
+currently active. The client secret is masked unless --reveal is passed.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			values := app.Cfg.Redacted()
 			if reveal {
@@ -54,7 +61,7 @@ func newConfigShowCommand(app *App) *cobra.Command {
 			}
 
 			t := &output.Table{Headers: []string{"KEY", "VALUE"}}
-			for _, key := range config.Keys() {
+			for _, key := range config.ShowKeys() {
 				t.AddRow(key, values[key])
 			}
 			return app.Printer.Print(values, t)
@@ -68,12 +75,16 @@ func newConfigSetCommand(app *App) *cobra.Command {
 	return &cobra.Command{
 		Use:   "set <key> <value>",
 		Short: "Set a configuration value",
-		Long: `Write a value to the config file.
+		Long: `Write a value to the stored configuration.
 
   dk config set client_id AbCdEf123
   dk config set client_secret s3cr3t
-  dk config set environment sandbox
   dk config set locale.currency EUR
+
+These keys belong to one registered DigiKey app and are written to the active
+environment's credentials file: ` + strings.Join(config.PerEnvironmentKeys(), ", ") + `.
+Run ` + "`dk env`" + ` first if you are not sure which environment that is. The
+environment itself is changed with ` + "`dk env`" + `, not here.
 
 Valid keys: ` + strings.Join(config.Keys(), ", "),
 		Args: cobra.ExactArgs(2),
@@ -100,13 +111,27 @@ Valid keys: ` + strings.Join(config.Keys(), ", "),
 				return err
 			}
 
+			// Report the file the value actually landed in. Save writes both,
+			// but naming the shared file after storing a client secret would
+			// point anyone auditing where their secret went at the wrong one.
 			path, _ := config.Path()
+			if config.IsPerEnvironmentKey(key) {
+				if p, err := config.CredentialsPath(stored.Environment); err == nil {
+					path = p
+				}
+			}
+
 			shown := value
 			if strings.EqualFold(key, "client_secret") {
 				shown = stored.Redacted()["client_secret"]
 			}
 
-			payload := map[string]string{"key": strings.ToLower(key), "value": shown, "file": path}
+			payload := map[string]string{
+				"key":         strings.ToLower(strings.TrimSpace(key)),
+				"value":       shown,
+				"file":        path,
+				"environment": stored.Environment,
+			}
 			t := &output.Table{Headers: []string{"KEY", "VALUE", "FILE"}}
 			t.AddRow(payload["key"], shown, path)
 			return app.Printer.Print(payload, t)
@@ -117,10 +142,14 @@ Valid keys: ` + strings.Join(config.Keys(), ", "),
 func newConfigPathCommand(app *App) *cobra.Command {
 	return &cobra.Command{
 		Use:   "path",
-		Short: "Print the config and token file locations",
+		Short: "Print the config, credentials, and token file locations",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgPath, err := config.Path()
+			if err != nil {
+				return err
+			}
+			credsPath, err := config.CredentialsPath(app.Cfg.Environment)
 			if err != nil {
 				return err
 			}
@@ -129,9 +158,18 @@ func newConfigPathCommand(app *App) *cobra.Command {
 				return err
 			}
 
-			payload := map[string]string{"config_file": cfgPath, "token_file": store.Path()}
+			payload := map[string]string{
+				"config_file":      cfgPath,
+				"credentials_file": credsPath,
+				"token_file":       store.Path(),
+				"environment":      app.Cfg.Environment,
+			}
 			t := &output.Table{Headers: []string{"FILE", "PATH"}}
 			t.AddRow("config", cfgPath)
+			// Named for the environment it belongs to: the path alone already
+			// says which, but a caller reading the table should not have to
+			// parse a filename to find out.
+			t.AddRow("credentials ("+app.Cfg.Environment+")", credsPath)
 			t.AddRow("tokens", store.Path())
 			return app.Printer.Print(payload, t)
 		},

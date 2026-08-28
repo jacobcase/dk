@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jacobcase/dk/internal/config"
 	"github.com/jacobcase/dk/internal/output"
 )
 
@@ -806,20 +807,219 @@ func TestConfigSetDoesNotPersistEnvironmentSecret(t *testing.T) {
 	t.Setenv("DIGIKEY_CLIENT_ID", "env-id")
 
 	var stdout, stderr strings.Builder
-	code := Execute(context.Background(), []string{"config", "set", "environment", "sandbox"},
+	code := Execute(context.Background(), []string{"config", "set", "locale.currency", "EUR"},
 		strings.NewReader(""), &stdout, &stderr)
 	if code != ExitOK {
 		t.Fatalf("exit code = %d\nstderr: %s", code, stderr.String())
 	}
 
-	raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	// Setting an unrelated key must not sweep an environment-only secret onto
+	// disk as a side effect. Save writes both files, so both have to be checked
+	// — the credentials file is the one the secret would land in.
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Setting an unrelated key must not sweep an environment-only secret onto
-	// disk as a side effect.
-	if strings.Contains(string(raw), "env-only-secret") {
-		t.Errorf("config file captured a secret that was only in the environment:\n%s", raw)
+	for _, e := range entries {
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "env-only-secret") {
+			t.Errorf("%s captured a secret that was only in the environment:\n%s", e.Name(), raw)
+		}
+	}
+}
+
+// `dk config set` cannot change the environment: it is what decides which
+// credentials file the write lands in, so the two are kept apart.
+func TestConfigSetRejectsEnvironment(t *testing.T) {
+	res := run(t, nil, "config", "set", "environment", "sandbox")
+	if res.Code != ExitUsage {
+		t.Errorf("exit code = %d, want %d", res.Code, ExitUsage)
+	}
+	if !strings.Contains(res.Stderr, "dk env") {
+		t.Errorf("error must point at the command that does work; got:\n%s", res.Stderr)
+	}
+}
+
+func TestEnvDefaultsToProduction(t *testing.T) {
+	res := run(t, nil, "env", "--output", "json")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+	var status EnvStatus
+	if err := json.Unmarshal([]byte(res.Stdout), &status); err != nil {
+		t.Fatalf("unparseable output: %v\n%s", err, res.Stdout)
+	}
+	if status.Environment != config.EnvProduction {
+		t.Errorf("environment = %q, want %q", status.Environment, config.EnvProduction)
+	}
+	if status.BaseURL != config.ProductionBaseURL {
+		t.Errorf("base_url = %q, want %q", status.BaseURL, config.ProductionBaseURL)
+	}
+}
+
+// The point of the command: the switch is persistent, so a later, separate run
+// still reports the new environment.
+func TestEnvSwitchPersistsAcrossRuns(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("DK_CONFIG_DIR", dir)
+
+	var stdout, stderr strings.Builder
+	if code := Execute(context.Background(), []string{"env", "sandbox", "--output", "json"},
+		strings.NewReader(""), &stdout, &stderr); code != ExitOK {
+		t.Fatalf("env sandbox exit code = %d\nstderr: %s", code, stderr.String())
+	}
+	var set EnvStatus
+	if err := json.Unmarshal([]byte(stdout.String()), &set); err != nil {
+		t.Fatalf("unparseable output: %v\n%s", err, stdout.String())
+	}
+	// The switching form reports the environment it just wrote, not the one the
+	// run started in.
+	if set.Environment != config.EnvSandbox {
+		t.Errorf("environment = %q, want %q", set.Environment, config.EnvSandbox)
+	}
+	if set.BaseURL != config.SandboxBaseURL {
+		t.Errorf("base_url = %q, want %q", set.BaseURL, config.SandboxBaseURL)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Execute(context.Background(), []string{"env", "--output", "json"},
+		strings.NewReader(""), &stdout, &stderr); code != ExitOK {
+		t.Fatalf("env exit code = %d\nstderr: %s", code, stderr.String())
+	}
+	var after EnvStatus
+	if err := json.Unmarshal([]byte(stdout.String()), &after); err != nil {
+		t.Fatalf("unparseable output: %v\n%s", err, stdout.String())
+	}
+	if after.Environment != config.EnvSandbox {
+		t.Errorf("environment = %q, want %q: the switch did not persist", after.Environment, config.EnvSandbox)
+	}
+}
+
+func TestEnvAcceptsShortForms(t *testing.T) {
+	for _, tc := range []struct{ arg, want string }{
+		{"prod", config.EnvProduction},
+		{"production", config.EnvProduction},
+		{"sbx", config.EnvSandbox},
+		{"sandbox", config.EnvSandbox},
+	} {
+		t.Run(tc.arg, func(t *testing.T) {
+			res := run(t, nil, "env", tc.arg, "--output", "json")
+			if res.Code != ExitOK {
+				t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+			}
+			var status EnvStatus
+			if err := json.Unmarshal([]byte(res.Stdout), &status); err != nil {
+				t.Fatalf("unparseable output: %v\n%s", err, res.Stdout)
+			}
+			if status.Environment != tc.want {
+				t.Errorf("environment = %q, want %q", status.Environment, tc.want)
+			}
+		})
+	}
+}
+
+func TestEnvRejectsUnknownName(t *testing.T) {
+	res := run(t, nil, "env", "staging")
+	if res.Code != ExitUsage {
+		t.Errorf("exit code = %d, want %d", res.Code, ExitUsage)
+	}
+}
+
+// Switching to an environment with no credentials must not silently inherit the
+// other one's: DigiKey rejects a production client id at the sandbox host, and
+// a 401 is a much worse explanation than an empty client_id_set.
+func TestEnvSwitchDoesNotInheritCredentials(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("DK_CONFIG_DIR", dir)
+
+	var stdout, stderr strings.Builder
+	if code := Execute(context.Background(), []string{"config", "set", "client_id", "prod-id"},
+		strings.NewReader(""), &stdout, &stderr); code != ExitOK {
+		t.Fatalf("config set exit code = %d\nstderr: %s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Execute(context.Background(), []string{"env", "sandbox", "--output", "json"},
+		strings.NewReader(""), &stdout, &stderr); code != ExitOK {
+		t.Fatalf("env sandbox exit code = %d\nstderr: %s", code, stderr.String())
+	}
+	var status EnvStatus
+	if err := json.Unmarshal([]byte(stdout.String()), &status); err != nil {
+		t.Fatalf("unparseable output: %v\n%s", err, stdout.String())
+	}
+	if status.ClientIDSet {
+		t.Error("client_id_set = true for a sandbox that was never given credentials")
+	}
+}
+
+func TestEnvListMarksTheActiveEnvironment(t *testing.T) {
+	res := run(t, nil, "env", "list", "--output", "json")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+	var entries []EnvListEntry
+	if err := json.Unmarshal([]byte(res.Stdout), &entries); err != nil {
+		t.Fatalf("unparseable output: %v\n%s", err, res.Stdout)
+	}
+	if len(entries) != len(config.Environments()) {
+		t.Fatalf("got %d environments, want %d", len(entries), len(config.Environments()))
+	}
+	active := 0
+	for _, e := range entries {
+		if e.Active {
+			active++
+		}
+	}
+	if active != 1 {
+		t.Errorf("%d environments marked active, want exactly 1", active)
+	}
+}
+
+// The environment decides which credentials and which host every other command
+// uses, so it has to be legible from the status output rather than inferred.
+func TestAuthStatusReportsEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("DK_CONFIG_DIR", dir)
+
+	var stdout, stderr strings.Builder
+	if code := Execute(context.Background(), []string{"env", "sandbox"},
+		strings.NewReader(""), &stdout, &stderr); code != ExitOK {
+		t.Fatalf("env sandbox exit code = %d\nstderr: %s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Execute(context.Background(), []string{"auth", "status", "--output", "json"},
+		strings.NewReader(""), &stdout, &stderr); code != ExitOK {
+		t.Fatalf("auth status exit code = %d\nstderr: %s", code, stderr.String())
+	}
+	var status AuthStatus
+	if err := json.Unmarshal([]byte(stdout.String()), &status); err != nil {
+		t.Fatalf("unparseable output: %v\n%s", err, stdout.String())
+	}
+	if status.Environment != config.EnvSandbox {
+		t.Errorf("environment = %q, want %q", status.Environment, config.EnvSandbox)
+	}
+	if status.BaseURL != config.SandboxBaseURL {
+		t.Errorf("base_url = %q, want %q", status.BaseURL, config.SandboxBaseURL)
+	}
+	if !strings.Contains(status.CredentialsFile, "credentials-sandbox.json") {
+		t.Errorf("credentials_file = %q, want the sandbox file", status.CredentialsFile)
+	}
+}
+
+// There is no per-command environment override. A leftover --env in a script
+// must fail loudly rather than be ignored while the command runs against the
+// wrong deployment.
+func TestEnvFlagIsGone(t *testing.T) {
+	res := run(t, nil, "search", "cap", "--env", "sandbox")
+	if res.Code != ExitUsage {
+		t.Errorf("exit code = %d, want %d for an unknown flag", res.Code, ExitUsage)
 	}
 }
 

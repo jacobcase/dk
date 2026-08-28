@@ -56,7 +56,6 @@ type App struct {
 
 	// flag overrides captured before config is loaded
 	flagOutput       string
-	flagEnv          string
 	flagClientID     string
 	flagClientSecret string
 	flagAccountID    string
@@ -298,7 +297,6 @@ Run "dk guide" for a condensed reference aimed at automated callers.`,
 
 	f := root.PersistentFlags()
 	f.StringVarP(&app.flagOutput, "output", "o", "", fmt.Sprintf("output format: %v (default: table on a terminal, json when piped)", output.Formats()))
-	f.StringVar(&app.flagEnv, "env", "", "DigiKey environment: production or sandbox")
 	f.StringVar(&app.flagClientID, "client-id", "", "DigiKey app client id (overrides config and DIGIKEY_CLIENT_ID)")
 	f.StringVar(&app.flagClientSecret, "client-secret", "", "DigiKey app client secret (overrides config and DIGIKEY_CLIENT_SECRET)")
 	f.StringVar(&app.flagAccountID, "account-id", "", "DigiKey account id, for logins with more than one account")
@@ -311,9 +309,6 @@ Run "dk guide" for a condensed reference aimed at automated callers.`,
 
 	_ = root.RegisterFlagCompletionFunc("output", func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
 		return output.Formats(), cobra.ShellCompDirectiveNoFileComp
-	})
-	_ = root.RegisterFlagCompletionFunc("env", func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
-		return []string{config.EnvProduction, config.EnvSandbox}, cobra.ShellCompDirectiveNoFileComp
 	})
 
 	root.AddCommand(
@@ -328,6 +323,7 @@ Run "dk guide" for a condensed reference aimed at automated callers.`,
 		newListCommand(app),
 		newAuthCommand(app),
 		newConfigCommand(app),
+		newEnvCommand(app),
 		newCacheCommand(app),
 		newGuideCommand(app),
 		newVersionCommand(app),
@@ -359,9 +355,6 @@ func (a *App) setup(cmd *cobra.Command) error {
 	}
 	if a.flagClientSecret != "" {
 		cfg.ClientSecret = a.flagClientSecret
-	}
-	if a.flagEnv != "" {
-		cfg.Environment = a.flagEnv
 	}
 	if a.flagAccountID != "" {
 		cfg.AccountID = a.flagAccountID

@@ -1,8 +1,23 @@
 // Package config loads and persists dk's on-disk configuration.
 //
+// The configuration is split across two kinds of file:
+//
+//   - config.json holds the settings that are the same whichever DigiKey
+//     deployment you are talking to: the locale, the response-cache window, and
+//     the pointer naming which environment is currently active.
+//   - credentials-<environment>.json holds one registered app: its client id
+//     and secret, the redirect URI registered with it, and the account id it
+//     acts as. DigiKey scopes a client id to a single deployment — a production
+//     client id is rejected by the sandbox host — so these cannot be shared,
+//     and each environment gets its own file.
+//
+// Callers see the two merged into a single flat Config. Which credentials file
+// is read is decided entirely by the active environment; there is no per-run
+// override, so what `dk env` reports is always what the next command will use.
+//
 // Values resolve with the precedence: explicit flags (applied by the caller) >
-// environment variables > config file > built-in defaults. Secrets may live in
-// the config file, so it is always written with 0600 permissions.
+// environment variables > the files above > built-in defaults. Secrets live in
+// the credentials file, so it is always written with 0600 permissions.
 package config
 
 import (
@@ -25,6 +40,33 @@ const (
 	EnvSandbox    = "sandbox"
 )
 
+// Environments lists every environment dk knows about, in display order.
+func Environments() []string { return []string{EnvProduction, EnvSandbox} }
+
+// ParseEnvironment normalizes an environment name as typed by a human. It
+// accepts the short forms so that `dk env prod` and `dk env sbx` work.
+func ParseEnvironment(v string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "production", "prod", "prd":
+		return EnvProduction, nil
+	case "sandbox", "sand", "sbx":
+		return EnvSandbox, nil
+	default:
+		return "", fmt.Errorf("unknown environment %q: want %q or %q", v, EnvProduction, EnvSandbox)
+	}
+}
+
+// environmentOrDefault normalizes an environment name, treating the empty
+// string as the default rather than an error. A Config built in code rather
+// than loaded may leave the field unset, and that should mean the same thing
+// Default() means by it, not a failure to save.
+func environmentOrDefault(v string) (string, error) {
+	if strings.TrimSpace(v) == "" {
+		return EnvProduction, nil
+	}
+	return ParseEnvironment(v)
+}
+
 // Base URLs for the two DigiKey environments. Both OAuth and the REST APIs are
 // served from these hosts.
 const (
@@ -45,24 +87,58 @@ type Locale struct {
 	Currency string `json:"currency,omitempty"`
 }
 
-// Config is the full set of persisted settings.
+// Config is the full set of settings, flattened from the shared file and the
+// active environment's credentials file.
 type Config struct {
+	// Environment selects both the API host and which credentials file the
+	// fields below were read from. It is persisted in config.json and changed
+	// with `dk env`.
+	Environment string `json:"environment,omitempty"`
+
+	// Per-environment: these come from credentials-<Environment>.json.
 	ClientID     string `json:"client_id,omitempty"`
 	ClientSecret string `json:"client_secret,omitempty"`
-	Environment  string `json:"environment,omitempty"`
 	RedirectURI  string `json:"redirect_uri,omitempty"`
 	// AccountID populates X-DIGIKEY-Account-Id, which selects between multiple
 	// DigiKey accounts tied to one login. Optional for most users.
 	AccountID string `json:"account_id,omitempty"`
-	Locale    Locale `json:"locale,omitempty"`
-	// APIBaseURL overrides the environment-derived host. It exists for pointing
-	// dk at a mock server during testing; leave it empty in normal use.
-	APIBaseURL string `json:"api_base_url,omitempty"`
+
+	// Shared: these come from config.json.
+	Locale Locale `json:"locale,omitempty"`
 	// CacheTTL is how long a cached API response stays fresh, as a Go duration
 	// ("10m", "30s"). "0" disables the response cache. It is stored as text
 	// rather than a duration so that the same merge and environment-overlay
 	// rules that cover every other setting apply unchanged.
 	CacheTTL string `json:"cache_ttl,omitempty"`
+	// APIBaseURL overrides the environment-derived host. It exists for pointing
+	// dk at a mock server during testing; leave it empty in normal use.
+	APIBaseURL string `json:"api_base_url,omitempty"`
+}
+
+// sharedFile is the on-disk shape of config.json.
+type sharedFile struct {
+	Environment string `json:"environment,omitempty"`
+	Locale      Locale `json:"locale,omitempty"`
+	CacheTTL    string `json:"cache_ttl,omitempty"`
+	APIBaseURL  string `json:"api_base_url,omitempty"`
+
+	// The remaining fields are the credentials as the single-file layout stored
+	// them, before each environment got a file of its own. They are read as a
+	// fallback for the active environment when it has no credentials file yet,
+	// which keeps a working install working across the change. Save never
+	// writes them, so they disappear the first time anything is written.
+	LegacyClientID     string `json:"client_id,omitempty"`
+	LegacyClientSecret string `json:"client_secret,omitempty"`
+	LegacyRedirectURI  string `json:"redirect_uri,omitempty"`
+	LegacyAccountID    string `json:"account_id,omitempty"`
+}
+
+// credentialsFile is the on-disk shape of credentials-<environment>.json.
+type credentialsFile struct {
+	ClientID     string `json:"client_id,omitempty"`
+	ClientSecret string `json:"client_secret,omitempty"`
+	RedirectURI  string `json:"redirect_uri,omitempty"`
+	AccountID    string `json:"account_id,omitempty"`
 }
 
 // Default returns a Config populated with built-in defaults only.
@@ -101,7 +177,7 @@ func (c Config) Validate() error {
 		missing = append(missing, "client_secret")
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("missing credentials: %s", strings.Join(missing, ", "))
+		return fmt.Errorf("missing credentials for the %s environment: %s", c.Environment, strings.Join(missing, ", "))
 	}
 	if c.Environment != "" && !strings.EqualFold(c.Environment, EnvProduction) && !strings.EqualFold(c.Environment, EnvSandbox) {
 		return fmt.Errorf("invalid environment %q: want %q or %q", c.Environment, EnvProduction, EnvSandbox)
@@ -225,7 +301,7 @@ func (c Config) CacheTTLDuration() (time.Duration, error) {
 	return ParseCacheTTL(c.CacheTTL)
 }
 
-// Path returns the full path to config.json.
+// Path returns the full path to config.json, the shared settings file.
 func Path() (string, error) {
 	dir, err := Dir()
 	if err != nil {
@@ -234,9 +310,24 @@ func Path() (string, error) {
 	return filepath.Join(dir, "config.json"), nil
 }
 
-// Load reads config.json (if present), overlays environment variables, and
-// fills in defaults. A missing file is not an error: dk is fully usable with
-// environment variables alone.
+// CredentialsPath returns the full path to one environment's credentials file.
+// The environment is normalized first, so the name on disk is always one of the
+// canonical spellings rather than whatever short form was typed.
+func CredentialsPath(environment string) (string, error) {
+	env, err := environmentOrDefault(environment)
+	if err != nil {
+		return "", err
+	}
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "credentials-"+env+".json"), nil
+}
+
+// Load reads the shared file and the active environment's credentials, overlays
+// environment variables, and fills in defaults. Missing files are not an error:
+// dk is fully usable with environment variables alone.
 func Load() (Config, error) {
 	cfg, err := LoadFile()
 	if err != nil {
@@ -245,38 +336,135 @@ func Load() (Config, error) {
 	return applyEnv(cfg), nil
 }
 
-// LoadFile reads config.json over the built-in defaults, without applying
-// environment variables. `dk config set` uses it so that a secret passed only
-// through the environment is never written to disk as a side effect.
+// LoadFile reads the stored configuration for the active environment over the
+// built-in defaults, without applying environment variables. `dk config set`
+// uses it so that a secret passed only through the environment is never written
+// to disk as a side effect.
 func LoadFile() (Config, error) {
-	cfg := Default()
+	shared, err := loadShared()
+	if err != nil {
+		return Default(), err
+	}
 
-	path, err := Path()
+	env := EnvProduction
+	if shared.Environment != "" {
+		env, err = ParseEnvironment(shared.Environment)
+		if err != nil {
+			path, _ := Path()
+			return Default(), fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	return resolve(env, shared)
+}
+
+// LoadEnvironment reads the stored configuration for a named environment,
+// active or not, without applying environment variables. `dk env` uses it to
+// report on an environment it is about to switch to.
+func LoadEnvironment(environment string) (Config, error) {
+	env, err := ParseEnvironment(environment)
+	if err != nil {
+		return Default(), err
+	}
+	shared, err := loadShared()
+	if err != nil {
+		return Default(), err
+	}
+	return resolve(env, shared)
+}
+
+// resolve layers one environment's credentials and the shared settings over the
+// built-in defaults.
+func resolve(env string, shared sharedFile) (Config, error) {
+	cfg := Default()
+	cfg.Environment = env
+
+	setIfNotEmpty(&cfg.Locale.Site, shared.Locale.Site)
+	setIfNotEmpty(&cfg.Locale.Language, shared.Locale.Language)
+	setIfNotEmpty(&cfg.Locale.Currency, shared.Locale.Currency)
+	setIfNotEmpty(&cfg.CacheTTL, shared.CacheTTL)
+	setIfNotEmpty(&cfg.APIBaseURL, shared.APIBaseURL)
+
+	creds, found, err := loadCredentials(env)
 	if err != nil {
 		return cfg, err
 	}
+	if !found && strings.EqualFold(env, shared.Environment) {
+		// No file for this environment yet. Credentials left in config.json by
+		// the single-file layout belong to whichever environment that file
+		// names, and only to that one — carrying them into the other
+		// environment would hand the sandbox a production client id.
+		creds = credentialsFile{
+			ClientID:     shared.LegacyClientID,
+			ClientSecret: shared.LegacyClientSecret,
+			RedirectURI:  shared.LegacyRedirectURI,
+			AccountID:    shared.LegacyAccountID,
+		}
+	}
+	setIfNotEmpty(&cfg.ClientID, creds.ClientID)
+	setIfNotEmpty(&cfg.ClientSecret, creds.ClientSecret)
+	setIfNotEmpty(&cfg.RedirectURI, creds.RedirectURI)
+	setIfNotEmpty(&cfg.AccountID, creds.AccountID)
 
+	return cfg, nil
+}
+
+// loadShared reads config.json. A missing file yields the zero value.
+func loadShared() (sharedFile, error) {
+	var file sharedFile
+
+	path, err := Path()
+	if err != nil {
+		return file, err
+	}
 	data, err := os.ReadFile(path)
 	switch {
 	case err == nil:
-		var fileCfg Config
-		if err := json.Unmarshal(data, &fileCfg); err != nil {
-			return cfg, fmt.Errorf("parse %s: %w", path, err)
+		if err := json.Unmarshal(data, &file); err != nil {
+			return file, fmt.Errorf("parse %s: %w", path, err)
 		}
-		return merge(cfg, fileCfg), nil
+		return file, nil
 	case errors.Is(err, fs.ErrNotExist):
-		// No config file; defaults are enough.
-		return cfg, nil
+		return file, nil
 	default:
-		return cfg, fmt.Errorf("read %s: %w", path, err)
+		return file, fmt.Errorf("read %s: %w", path, err)
+	}
+}
+
+// loadCredentials reads one environment's credentials file. The bool reports
+// whether the file existed, which is what separates "no credentials stored for
+// this environment" from "stored, but every field is empty" — only the former
+// may fall back to the pre-split layout.
+func loadCredentials(environment string) (credentialsFile, bool, error) {
+	var file credentialsFile
+
+	path, err := CredentialsPath(environment)
+	if err != nil {
+		return file, false, err
+	}
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		if err := json.Unmarshal(data, &file); err != nil {
+			return file, true, fmt.Errorf("parse %s: %w", path, err)
+		}
+		return file, true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return file, false, nil
+	default:
+		return file, false, fmt.Errorf("read %s: %w", path, err)
 	}
 }
 
 // applyEnv overlays DIGIKEY_* environment variables onto cfg.
+//
+// There is deliberately no variable for the environment itself. Which DigiKey
+// deployment dk talks to is persistent state owned by `dk env`, so that the
+// environment `dk env` and `dk auth status` report is always the one the next
+// command will use — a variable that could differ per shell would make those
+// reports advisory rather than authoritative.
 func applyEnv(cfg Config) Config {
 	setString(&cfg.ClientID, "DIGIKEY_CLIENT_ID")
 	setString(&cfg.ClientSecret, "DIGIKEY_CLIENT_SECRET")
-	setString(&cfg.Environment, "DIGIKEY_ENV")
 	setString(&cfg.RedirectURI, "DIGIKEY_REDIRECT_URI")
 	setString(&cfg.AccountID, "DIGIKEY_ACCOUNT_ID")
 	setString(&cfg.Locale.Site, "DIGIKEY_LOCALE_SITE")
@@ -293,30 +481,89 @@ func setString(dst *string, env string) {
 	}
 }
 
-// merge overlays non-empty fields of over onto base.
-func merge(base, over Config) Config {
-	setIfNotEmpty(&base.ClientID, over.ClientID)
-	setIfNotEmpty(&base.ClientSecret, over.ClientSecret)
-	setIfNotEmpty(&base.Environment, over.Environment)
-	setIfNotEmpty(&base.RedirectURI, over.RedirectURI)
-	setIfNotEmpty(&base.AccountID, over.AccountID)
-	setIfNotEmpty(&base.Locale.Site, over.Locale.Site)
-	setIfNotEmpty(&base.Locale.Language, over.Locale.Language)
-	setIfNotEmpty(&base.Locale.Currency, over.Locale.Currency)
-	setIfNotEmpty(&base.APIBaseURL, over.APIBaseURL)
-	setIfNotEmpty(&base.CacheTTL, over.CacheTTL)
-	return base
-}
-
 func setIfNotEmpty(dst *string, v string) {
 	if v != "" {
 		*dst = v
 	}
 }
 
-// Save writes cfg to config.json with 0600 permissions, creating the directory
-// if needed. The write is atomic so a crash cannot truncate an existing config.
+// Save writes cfg back to disk, splitting it across the shared file and the
+// active environment's credentials file. Both are written with 0600
+// permissions and atomically, so a crash cannot truncate either one.
+//
+// The credentials file is written even when only a shared setting changed. It
+// is the cheaper mistake: the alternative is tracking which half a caller
+// touched, and a stale secret left behind by a missed write is far worse than
+// an identical file rewritten.
 func Save(cfg Config) error {
+	env, err := environmentOrDefault(cfg.Environment)
+	if err != nil {
+		return err
+	}
+
+	dir, err := Dir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+
+	sharedPath, err := Path()
+	if err != nil {
+		return err
+	}
+	// Built from the fields explicitly, not from cfg wholesale: that is what
+	// drops the pre-split credential keys rather than writing them back.
+	if err := writeJSON(sharedPath, sharedFile{
+		Environment: env,
+		Locale:      cfg.Locale,
+		CacheTTL:    cfg.CacheTTL,
+		APIBaseURL:  cfg.APIBaseURL,
+	}); err != nil {
+		return err
+	}
+
+	credsPath, err := CredentialsPath(env)
+	if err != nil {
+		return err
+	}
+	return writeJSON(credsPath, credentialsFile{
+		ClientID:     cfg.ClientID,
+		ClientSecret: cfg.ClientSecret,
+		RedirectURI:  cfg.RedirectURI,
+		AccountID:    cfg.AccountID,
+	})
+}
+
+// SaveEnvironment records which environment is active, leaving every other
+// stored setting alone. `dk env` uses it rather than Save so that switching
+// environments never rewrites the credentials of the one being left.
+func SaveEnvironment(environment string) error {
+	env, err := ParseEnvironment(environment)
+	if err != nil {
+		return err
+	}
+
+	shared, err := loadShared()
+	if err != nil {
+		return err
+	}
+
+	// Credentials left in config.json by the single-file layout are identified
+	// only by the environment that file names — so they have to be moved out
+	// before the name changes. Skipping this would not lose them: it would
+	// silently hand them to the environment being switched *to*, which for a
+	// production secret adopted by the sandbox is worse than losing them.
+	if err := extractLegacyCredentials(shared); err != nil {
+		return err
+	}
+	shared.LegacyClientID = ""
+	shared.LegacyClientSecret = ""
+	shared.LegacyRedirectURI = ""
+	shared.LegacyAccountID = ""
+	shared.Environment = env
+
 	path, err := Path()
 	if err != nil {
 		return err
@@ -324,13 +571,54 @@ func Save(cfg Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
+	return writeJSON(path, shared)
+}
 
-	data, err := json.MarshalIndent(cfg, "", "  ")
+// extractLegacyCredentials writes the pre-split credentials from config.json
+// into the file of the environment that config.json currently names. It is a
+// no-op when there are none, or when that environment already has a file of its
+// own — an existing file is the newer truth and is never overwritten.
+func extractLegacyCredentials(shared sharedFile) error {
+	if shared.LegacyClientID == "" && shared.LegacyClientSecret == "" &&
+		shared.LegacyRedirectURI == "" && shared.LegacyAccountID == "" {
+		return nil
+	}
+
+	owner, err := environmentOrDefault(shared.Environment)
 	if err != nil {
-		return fmt.Errorf("encode config: %w", err)
+		// An unreadable environment name means there is no way to tell whose
+		// credentials these are. Refuse rather than guess: guessing wrong
+		// attaches one deployment's secret to the other.
+		return fmt.Errorf("cannot tell which environment the credentials in config.json belong to: %w", err)
+	}
+
+	if _, found, err := loadCredentials(owner); err != nil {
+		return err
+	} else if found {
+		return nil
+	}
+
+	path, err := CredentialsPath(owner)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	return writeJSON(path, credentialsFile{
+		ClientID:     shared.LegacyClientID,
+		ClientSecret: shared.LegacyClientSecret,
+		RedirectURI:  shared.LegacyRedirectURI,
+		AccountID:    shared.LegacyAccountID,
+	})
+}
+
+func writeJSON(path string, v any) error {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode %s: %w", filepath.Base(path), err)
 	}
 	data = append(data, '\n')
-
 	return atomicfile.Write(path, data, 0o600)
 }
 
@@ -342,10 +630,10 @@ func (c *Config) Set(key, value string) error {
 	case "client_secret":
 		c.ClientSecret = value
 	case "environment", "env":
-		if !strings.EqualFold(value, EnvProduction) && !strings.EqualFold(value, EnvSandbox) {
-			return fmt.Errorf("environment must be %q or %q", EnvProduction, EnvSandbox)
-		}
-		c.Environment = strings.ToLower(value)
+		// Rejected rather than accepted as a synonym. The environment decides
+		// which credentials file `dk config set` writes to, so setting it here
+		// would mean one command that both redirects the write and performs it.
+		return errors.New("the environment is not set through `dk config set`; use `dk env production` or `dk env sandbox`")
 	case "redirect_uri":
 		c.RedirectURI = value
 	case "account_id":
@@ -367,12 +655,12 @@ func (c *Config) Set(key, value string) error {
 	return nil
 }
 
-// Keys lists the settable config keys, in the order `dk config show` prints them.
+// Keys lists the settable config keys, in the order `dk config set` documents
+// them. The environment is absent on purpose: it is changed with `dk env`.
 func Keys() []string {
 	return []string{
 		"client_id",
 		"client_secret",
-		"environment",
 		"redirect_uri",
 		"account_id",
 		"locale.site",
@@ -380,6 +668,31 @@ func Keys() []string {
 		"locale.currency",
 		"cache_ttl",
 	}
+}
+
+// ShowKeys lists what `dk config show` prints: every settable key, plus the
+// environment, which is shown because it decides where four of the others were
+// read from and would be confusing to omit.
+func ShowKeys() []string {
+	return append([]string{"environment"}, Keys()...)
+}
+
+// PerEnvironmentKeys lists the keys stored in the active environment's
+// credentials file rather than in the shared one.
+func PerEnvironmentKeys() []string {
+	return []string{"client_id", "client_secret", "redirect_uri", "account_id"}
+}
+
+// IsPerEnvironmentKey reports whether a key is stored in the credentials file.
+// It accepts the same spellings Set does, so a caller need not normalize first.
+func IsPerEnvironmentKey(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	for _, k := range PerEnvironmentKeys() {
+		if key == k {
+			return true
+		}
+	}
+	return false
 }
 
 // Redacted returns a key/value view of the config with the client secret masked,
