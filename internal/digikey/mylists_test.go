@@ -843,3 +843,32 @@ func TestAllListsAcceptsAClampedTailAsTheEnd(t *testing.T) {
 		t.Fatalf("AllLists() returned %d lists, want all %d", len(all), total)
 	}
 }
+
+// A name is trimmed before anything compares it. The local fallback normalizes
+// the names it reads from the account, so an untrimmed candidate used to miss a
+// list differing only by surrounding space and report a taken name as free —
+// CreateList then failed on the duplicate --auto-rename exists to avoid.
+func TestSuggestListNameTrimsBeforeComparing(t *testing.T) {
+	rc := newRoutedClient(t, map[string]route{
+		"GET /mylists/v1/lists/validate/name/ Bench PSU ": {
+			status: http.StatusNotFound,
+			body:   `{"ErrorMessage":"Invalid resource path"}`,
+		},
+		"GET /mylists/v1/lists/validate/name/Bench PSU": {
+			status: http.StatusNotFound,
+			body:   `{"ErrorMessage":"Invalid resource path"}`,
+		},
+		"GET /mylists/v1/lists": {status: http.StatusOK, body: `[
+		  {"Id":"a","ListName":"Bench PSU"}
+		]`},
+	})
+
+	got, err := rc.SuggestListName(context.Background(), "  Bench PSU  ")
+	if err != nil {
+		t.Fatalf("SuggestListName() error = %v", err)
+	}
+	if got != "Bench PSU (2)" {
+		t.Errorf("SuggestListName(%q) = %q, want \"Bench PSU (2)\": surrounding space does not make a taken name free",
+			"  Bench PSU  ", got)
+	}
+}

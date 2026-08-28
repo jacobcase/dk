@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -449,5 +450,174 @@ func TestPricingRejectsUnknownPackaging(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// cappedBody is the live answer for WK-KIT-ND at quantity 1000, trimmed.
+// DigiKey has 172 of a discontinued part and quotes those 172 as the only
+// option, labelled MaxOrderQuantity. Note what the option does NOT say: the
+// quantity went down rather than up, so forced_up is false, and the total is
+// the real price of the 172 it will sell. Nothing here reads as a shortfall.
+const cappedBody = `{
+  "RequestedProduct": "WK-KIT-ND",
+  "RequestedQuantity": 1000,
+  "SettingsUsed": {"SearchLocaleUsed": {"Site":"US","Language":"en","Currency":"USD"}},
+  "MyPricingOptions": [],
+  "StandardPricingOptions": [
+    {"PricingOption":"MaxOrderQuantity","TotalQuantityPriced":172,"TotalPrice":1327.84,
+     "Products":[{"DigiKeyProductNumber":"WK-KIT-ND","QuantityPriced":172,
+       "MinimumOrderQuantity":1,"ExtendedPrice":1327.84,"UnitPrice":7.72,
+       "PackageType":{"Id":0,"Name":"Bag"},
+       "TariffInformation":{"TariffActive":true}}]}
+  ]
+}`
+
+const cappedDetailsBody = `{
+  "Product": {
+    "ProductStatus": {"Id": 1, "Status": "Discontinued at DigiKey"},
+    "ProductVariations": [
+      {"DigiKeyProductNumber":"WK-KIT-ND","PackageType":{"Id":0,"Name":"Bag"},
+       "QuantityAvailableforPackageType":172,"MinimumOrderQuantity":1}
+    ]
+  }
+}`
+
+// An option that hands over fewer parts than were asked for must never be
+// best. It is in stock and it is the cheapest thing on offer — necessarily so,
+// since it buys less — and picking it answers "what do I order for 1000?" with
+// an order for 172.
+func TestPricingNeverRecommendsAnOptionShortOfTheRequest(t *testing.T) {
+	m := newMockDigiKey(t)
+	m.handle("GET", "/products/v4/search/WK-KIT-ND/pricingbyquantity/1000", http.StatusOK, cappedBody)
+	m.handle("GET", "/products/v4/search/WK-KIT-ND/productdetails", http.StatusOK, cappedDetailsBody)
+
+	res := run(t, m, "pricing", "WK-KIT-ND", "--qty", "1000")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+
+	var got PricingResult
+	res.JSON(t, &got)
+	if len(got.Options) != 1 {
+		t.Fatalf("got %d options, want 1", len(got.Options))
+	}
+	opt := got.Options[0]
+	if !opt.Short {
+		t.Errorf("option = %+v, want short: 172 does not fill a request for 1000", opt)
+	}
+	if opt.ForcedUp {
+		t.Error("forced_up must stay false when the quantity was capped downward")
+	}
+	// The line itself is genuinely orderable — this is not an out-of-stock part.
+	if !opt.InStock {
+		t.Errorf("option = %+v, want in_stock: DigiKey has all 172 it quoted", opt)
+	}
+	if got.Best != nil {
+		t.Errorf("best = %+v, want nil: no option covers the 1000 requested", got.Best)
+	}
+}
+
+// Reporting a capped part as out of stock sends the reader looking for a second
+// source when there is stock on the shelf. The count it will sell is the answer.
+func TestPricingSaysHowManyACappedPartWillSell(t *testing.T) {
+	m := newMockDigiKey(t)
+	m.handle("GET", "/products/v4/search/WK-KIT-ND/pricingbyquantity/1000", http.StatusOK, cappedBody)
+	m.handle("GET", "/products/v4/search/WK-KIT-ND/productdetails", http.StatusOK, cappedDetailsBody)
+
+	res := run(t, m, "pricing", "WK-KIT-ND", "--qty", "1000", "--output", "table")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+	if !strings.Contains(res.Stderr, "the most DigiKey will sell is 172") {
+		t.Errorf("stderr = %q, want the quantity DigiKey will actually sell", res.Stderr)
+	}
+	if strings.Contains(res.Stderr, "None of these pricing options are in stock") {
+		t.Error("a part with 172 on the shelf must not be reported as out of stock")
+	}
+	// The table has to carry the same warning the JSON does.
+	if !strings.Contains(res.Stdout, "!") || !strings.Contains(res.Stderr, "capped below the 1000 requested") {
+		t.Errorf("table = %q\nstderr = %q, want the capped option marked and explained", res.Stdout, res.Stderr)
+	}
+}
+
+// The currency label and the figures beside it have to come from one source.
+// DigiKey answers a --currency it will not honor for the site by pricing in the
+// site's own currency, and says so in SettingsUsed; the config value is only
+// what dk asked for.
+func TestPricingReportsTheCurrencyDigiKeyApplied(t *testing.T) {
+	m := pricingMock(t, "311-10.0KHRCT-ND", "250", pricingBody, detailsBody)
+
+	res := run(t, m, "pricing", "311-10.0KHRCT-ND", "--qty", "250", "--currency", "EUR")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+	var got PricingResult
+	res.JSON(t, &got)
+	if got.Currency != "USD" {
+		t.Errorf("currency = %q, want USD: DigiKey priced in USD however the request was made", got.Currency)
+	}
+}
+
+// Falling back to the requested currency keeps the key populated for a response
+// that carries no echo of its own.
+func TestPricingFallsBackToTheRequestedCurrency(t *testing.T) {
+	body := strings.Replace(pricingBody,
+		`"SettingsUsed": {"SearchLocaleUsed": {"Site":"US","Language":"en","Currency":"USD"}},`, "", 1)
+	m := pricingMock(t, "311-10.0KHRCT-ND", "250", body, detailsBody)
+
+	res := run(t, m, "pricing", "311-10.0KHRCT-ND", "--qty", "250", "--currency", "EUR")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+	var got PricingResult
+	res.JSON(t, &got)
+	if got.Currency != "EUR" {
+		t.Errorf("currency = %q, want the requested EUR when DigiKey echoed nothing", got.Currency)
+	}
+}
+
+// A two-product option prints its option-level figures once, so a spreadsheet
+// summing TOTAL does not treble it. That leaves the CSV with blank cells, and
+// blanks are all a machine reader has to go on — without the option number it
+// cannot tell a continuation row from an option with no label and no total.
+func TestPricingCSVKeepsAMixedOptionGroupable(t *testing.T) {
+	const mixed = `{
+	  "RequestedProduct":"311-10.0KHRCT-ND","RequestedQuantity":5250,
+	  "MyPricingOptions": [],
+	  "StandardPricingOptions":[
+	    {"PricingOption":"Exact","TotalQuantityPriced":5250,"TotalPrice":24.62,
+	     "Products":[
+	       {"DigiKeyProductNumber":"311-10.0KHRTR-ND","QuantityPriced":5000,
+	        "ExtendedPrice":23.45,"UnitPrice":0.00469,"PackageType":{"Id":1,"Name":"Tape & Reel (TR)"}},
+	       {"DigiKeyProductNumber":"311-10.0KHRCT-ND","QuantityPriced":250,
+	        "ExtendedPrice":1.17,"UnitPrice":0.00469,"PackageType":{"Id":2,"Name":"Cut Tape (CT)"}}]}]}`
+
+	m := pricingMock(t, "311-10.0KHRCT-ND", "5250", mixed, detailsBody)
+	res := run(t, m, "pricing", "311-10.0KHRCT-ND", "--qty", "5250", "--output", "csv")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+
+	rows, err := csv.NewReader(strings.NewReader(res.Stdout)).ReadAll()
+	if err != nil {
+		t.Fatalf("stdout is not valid csv: %v\n%s", err, res.Stdout)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("got %d csv rows, want a header and one row per product:\n%s", len(rows), res.Stdout)
+	}
+	if rows[0][0] != "#" {
+		t.Fatalf("first column = %q, want the option number that groups the rows", rows[0][0])
+	}
+	// Both lines belong to option 1, and say so on their own row.
+	if rows[1][0] != "1" || rows[2][0] != "1" {
+		t.Errorf("option numbers = %q and %q, want both rows in option 1", rows[1][0], rows[2][0])
+	}
+	// The total still appears once, so summing the column gives 24.62.
+	if rows[1][3] != "24.6200" || rows[2][3] != "" {
+		t.Errorf("totals = %q and %q, want the option total on the first row only", rows[1][3], rows[2][3])
+	}
+	// And each row keeps its own product's figures.
+	if rows[1][4] != "311-10.0KHRTR-ND" || rows[2][4] != "311-10.0KHRCT-ND" {
+		t.Errorf("part numbers = %q and %q, want one product per row", rows[1][4], rows[2][4])
 	}
 }

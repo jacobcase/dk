@@ -486,7 +486,13 @@ func (c *Client) RenameList(ctx context.Context, listID, newName string) error {
 // whether the name is taken, and inventing one from a listing dk could not
 // read would be a guess.
 func (c *Client) SuggestListName(ctx context.Context, name string) (string, error) {
-	if strings.TrimSpace(name) == "" {
+	// Trimmed once, here, rather than at each comparison below: the local
+	// fallback normalizes the names it reads from the account, so an untrimmed
+	// candidate would miss a list differing only by surrounding space and
+	// report a taken name as free — the one collision --auto-rename exists to
+	// avoid. Both CLI callers already trim; this is the library boundary.
+	name = strings.TrimSpace(name)
+	if name == "" {
 		return "", errors.New("list name is required")
 	}
 	var suggested string

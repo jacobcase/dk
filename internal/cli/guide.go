@@ -205,17 +205,27 @@ COSTING A QUANTITY
 
   JSON: {"part_number","requested_quantity","currency",
          "best":{...} | null,
-         "options":[{"option","order_quantity","forced_up","total_price",
+         "options":[{"option","order_quantity","forced_up","short","total_price",
                      "in_stock",
                      "products":[{"digikey_part_number","packaging","quantity",
                                   "unit_price","extended_price",
                                   "minimum_order_quantity","quantity_available",
                                   "in_stock","product_status"}]}]}
 
-  Read .best first: the cheapest option that is actually orderable, or null if
-  none are. Then read .forced_up — true when order_quantity exceeds what was
-  asked for. Always report order_quantity and total_price to the human, not
-  just a unit price.
+  Read .best first: the cheapest option that is actually orderable AND covers
+  the requested quantity, or null if none do. Then read .forced_up — true when
+  order_quantity exceeds what was asked for. Always report order_quantity and
+  total_price to the human, not just a unit price.
+
+  .short is the other direction: DigiKey answers a request it cannot fill with
+  an option capped at what it has — 172 against a request for 1000 — and
+  .forced_up is false there, because the quantity went the other way. A short
+  option is never .best. When best is null, check whether the options are short
+  rather than out of stock: the part may be on the shelf in smaller numbers.
+
+  .currency is what DigiKey applied, not necessarily what was asked for. A
+  --currency it will not honor for the site comes back priced in the site's own
+  currency, and this field says which.
 
   .option is DigiKey's own label for the option, one of:
     Exact                 buys exactly the requested quantity

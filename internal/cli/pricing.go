@@ -42,7 +42,14 @@ type PricingOption struct {
 	// a standard pack forces it up, and when buying more costs less.
 	OrderQuantity int `json:"order_quantity"`
 	// ForcedUp is true when OrderQuantity exceeds what was asked for.
-	ForcedUp   bool    `json:"forced_up"`
+	ForcedUp bool `json:"forced_up"`
+	// Short is true when OrderQuantity is below what was asked for. DigiKey
+	// answers a request it cannot fill with a MaxOrderQuantity option capped at
+	// what it has — 172 against a request for 1000, live — and nothing else on
+	// the option says so: TotalPrice is the price of the 172, and ForcedUp is
+	// false because the quantity went the other way. Such an option is never
+	// Best; it is a shortfall priced to look like a bargain.
+	Short      bool    `json:"short"`
 	TotalPrice float64 `json:"total_price"`
 	// InStock is true only when every product in the option has enough stock
 	// to fill its own line. An option is not orderable on the strength of one
@@ -147,10 +154,21 @@ DigiKey returns any.`,
 				}
 			}
 
+			// The currency DigiKey applied, which is not always the one asked
+			// for: --currency EUR against a US site is answered in USD, and
+			// labelling those figures EUR misstates a BOM by whatever the rate
+			// is. Same rule as pairing a part number with its price — the
+			// figure and its label come from one source. SettingsUsed is the
+			// only such echo on this response, and empty on some replies.
+			currency := resp.SettingsUsed.SearchLocaleUsed.Currency
+			if currency == "" {
+				currency = app.Cfg.Locale.Currency
+			}
+
 			result := PricingResult{
 				PartNumber:        partNumber,
 				RequestedQuantity: quantity,
-				Currency:          app.Cfg.Locale.Currency,
+				Currency:          currency,
 				Options:           []PricingOption{},
 			}
 			for _, o := range options {
@@ -159,21 +177,28 @@ DigiKey returns any.`,
 			result.Best = cheapestInStock(result.Options)
 
 			t := &output.Table{
-				Headers: []string{"OPTION", "ORDER QTY", "TOTAL", "DKPN", "PACKAGING", "QTY", "UNIT", "STOCK", "STATUS"},
+				Headers: []string{"#", "OPTION", "ORDER QTY", "TOTAL", "DKPN", "PACKAGING", "QTY", "UNIT", "STOCK", "STATUS"},
 				Empty:   "DigiKey returned no pricing options for this part and quantity.",
 			}
-			for _, o := range result.Options {
+			for n, o := range result.Options {
 				for i, p := range o.Products {
 					// The option's own figures print once. Repeating a total on
-					// every line of a two-part option invites reading it twice.
+					// every line of a two-part option invites reading it twice,
+					// and would treble it in a spreadsheet summing the column.
+					// The option number carries on every row instead, so the
+					// CSV — where the blanks are all a reader has — still says
+					// which lines belong to one option.
 					option, orderQty, total := "", any(""), ""
 					if i == 0 {
 						option, orderQty, total = o.Option, o.OrderQuantity, output.Money(o.TotalPrice)
 						if o.ForcedUp {
 							option += " *"
 						}
+						if o.Short {
+							option += " !"
+						}
 					}
-					t.AddRow(option, orderQty, total,
+					t.AddRow(n+1, option, orderQty, total,
 						p.DigiKeyPartNumber, output.Truncate(p.Packaging, 18), p.Quantity,
 						output.Money(p.UnitPrice), p.QuantityAvailable, p.ProductStatus)
 				}
@@ -182,16 +207,30 @@ DigiKey returns any.`,
 				return err
 			}
 
-			// The table marks a forced-up option with a "*", which needs
-			// saying once. PrintText is a no-op in JSON and CSV.
+			// The table marks an option that hands over more than was asked for
+			// with a "*", and one DigiKey caps below the request with a "!".
+			// Both need saying once. PrintText is a no-op in JSON and CSV.
+			var forcedUp, short bool
 			for _, o := range result.Options {
-				if o.ForcedUp {
-					app.Printer.PrintText("\n* hands you more than the %d requested.", quantity)
-					break
-				}
+				forcedUp = forcedUp || o.ForcedUp
+				short = short || o.Short
+			}
+			if len(result.Options) > 0 {
+				app.Printer.PrintText("")
+			}
+			if forcedUp {
+				app.Printer.PrintText("* hands you more than the %d requested.", quantity)
+			}
+			if short {
+				app.Printer.PrintText("! is capped below the %d requested.", quantity)
 			}
 
-			if result.Best != nil {
+			// A part DigiKey will sell, just not in the quantity asked for, is
+			// not "out of stock" — saying so sends the reader looking for a
+			// second source when there is stock on the shelf.
+			capped := largestShortInStock(result.Options)
+			switch {
+			case result.Best != nil:
 				app.Printer.PrintText("Cheapest in stock: %s, order %d for %s %s total.",
 					describeOption(*result.Best), result.Best.OrderQuantity,
 					output.Money(result.Best.TotalPrice), result.Currency)
@@ -199,8 +238,11 @@ DigiKey returns any.`,
 					app.Printer.PrintText("Note: this hands you %d units, not the %d requested.",
 						result.Best.OrderQuantity, quantity)
 				}
-			} else if len(result.Options) > 0 {
-				app.Printer.PrintText("\nNone of these pricing options are in stock.")
+			case capped > 0:
+				app.Printer.PrintText("No option covers the full %d requested: the most DigiKey will sell is %d.",
+					quantity, capped)
+			case len(result.Options) > 0:
+				app.Printer.PrintText("None of these pricing options are in stock.")
 			}
 			return nil
 		},
@@ -220,6 +262,7 @@ func buildPricingOption(o digikey.PricingOption, requested int, stock map[string
 		Option:        o.PricingOption,
 		OrderQuantity: o.TotalQuantityPriced,
 		ForcedUp:      o.TotalQuantityPriced > requested,
+		Short:         o.TotalQuantityPriced < requested,
 		TotalPrice:    o.TotalPrice,
 		InStock:       len(o.Products) > 0,
 		Products:      []PricingLine{},
@@ -314,12 +357,31 @@ func describeOption(o PricingOption) string {
 	}
 }
 
+// largestShortInStock returns the biggest quantity an orderable option will
+// actually deliver, when none of them cover the request. It is what keeps a
+// null best from reading as "nothing is available": DigiKey caps some parts
+// below what was asked for, and the useful answer is the number it will sell.
+// Zero means there is no such option.
+func largestShortInStock(options []PricingOption) int {
+	largest := 0
+	for _, o := range options {
+		if o.Short && o.InStock && o.OrderQuantity > largest {
+			largest = o.OrderQuantity
+		}
+	}
+	return largest
+}
+
 // cheapestInStock returns the lowest-total-price option that is actually
 // orderable, or nil if none are.
 func cheapestInStock(options []PricingOption) *PricingOption {
 	best := -1
 	for i, o := range options {
-		if !o.InStock || o.TotalPrice <= 0 {
+		// A short option is not a candidate however cheap it is: the cheapest
+		// way to buy fewer parts than you need is not an answer to "what do I
+		// order". Price alone would pick it, since a capped option costs less
+		// than one that fills the request by definition.
+		if o.Short || !o.InStock || o.TotalPrice <= 0 {
 			continue
 		}
 		if best < 0 || o.TotalPrice < options[best].TotalPrice {
