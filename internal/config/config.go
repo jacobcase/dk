@@ -121,16 +121,6 @@ type sharedFile struct {
 	Locale      Locale `json:"locale,omitempty"`
 	CacheTTL    string `json:"cache_ttl,omitempty"`
 	APIBaseURL  string `json:"api_base_url,omitempty"`
-
-	// The remaining fields are the credentials as the single-file layout stored
-	// them, before each environment got a file of its own. They are read as a
-	// fallback for the active environment when it has no credentials file yet,
-	// which keeps a working install working across the change. Save never
-	// writes them, so they disappear the first time anything is written.
-	LegacyClientID     string `json:"client_id,omitempty"`
-	LegacyClientSecret string `json:"client_secret,omitempty"`
-	LegacyRedirectURI  string `json:"redirect_uri,omitempty"`
-	LegacyAccountID    string `json:"account_id,omitempty"`
 }
 
 // credentialsFile is the on-disk shape of credentials-<environment>.json.
@@ -384,21 +374,9 @@ func resolve(env string, shared sharedFile) (Config, error) {
 	setIfNotEmpty(&cfg.CacheTTL, shared.CacheTTL)
 	setIfNotEmpty(&cfg.APIBaseURL, shared.APIBaseURL)
 
-	creds, found, err := loadCredentials(env)
+	creds, _, err := loadCredentials(env)
 	if err != nil {
 		return cfg, err
-	}
-	if !found && strings.EqualFold(env, shared.Environment) {
-		// No file for this environment yet. Credentials left in config.json by
-		// the single-file layout belong to whichever environment that file
-		// names, and only to that one — carrying them into the other
-		// environment would hand the sandbox a production client id.
-		creds = credentialsFile{
-			ClientID:     shared.LegacyClientID,
-			ClientSecret: shared.LegacyClientSecret,
-			RedirectURI:  shared.LegacyRedirectURI,
-			AccountID:    shared.LegacyAccountID,
-		}
 	}
 	setIfNotEmpty(&cfg.ClientID, creds.ClientID)
 	setIfNotEmpty(&cfg.ClientSecret, creds.ClientSecret)
@@ -513,8 +491,8 @@ func Save(cfg Config) error {
 	if err != nil {
 		return err
 	}
-	// Built from the fields explicitly, not from cfg wholesale: that is what
-	// drops the pre-split credential keys rather than writing them back.
+	// Built from the fields explicitly, not from cfg wholesale, so a credential
+	// can never reach config.json by being added to Config later.
 	if err := writeJSON(sharedPath, sharedFile{
 		Environment: env,
 		Locale:      cfg.Locale,
@@ -550,18 +528,6 @@ func SaveEnvironment(environment string) error {
 		return err
 	}
 
-	// Credentials left in config.json by the single-file layout are identified
-	// only by the environment that file names — so they have to be moved out
-	// before the name changes. Skipping this would not lose them: it would
-	// silently hand them to the environment being switched *to*, which for a
-	// production secret adopted by the sandbox is worse than losing them.
-	if err := extractLegacyCredentials(shared); err != nil {
-		return err
-	}
-	shared.LegacyClientID = ""
-	shared.LegacyClientSecret = ""
-	shared.LegacyRedirectURI = ""
-	shared.LegacyAccountID = ""
 	shared.Environment = env
 
 	path, err := Path()
@@ -572,45 +538,6 @@ func SaveEnvironment(environment string) error {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 	return writeJSON(path, shared)
-}
-
-// extractLegacyCredentials writes the pre-split credentials from config.json
-// into the file of the environment that config.json currently names. It is a
-// no-op when there are none, or when that environment already has a file of its
-// own — an existing file is the newer truth and is never overwritten.
-func extractLegacyCredentials(shared sharedFile) error {
-	if shared.LegacyClientID == "" && shared.LegacyClientSecret == "" &&
-		shared.LegacyRedirectURI == "" && shared.LegacyAccountID == "" {
-		return nil
-	}
-
-	owner, err := environmentOrDefault(shared.Environment)
-	if err != nil {
-		// An unreadable environment name means there is no way to tell whose
-		// credentials these are. Refuse rather than guess: guessing wrong
-		// attaches one deployment's secret to the other.
-		return fmt.Errorf("cannot tell which environment the credentials in config.json belong to: %w", err)
-	}
-
-	if _, found, err := loadCredentials(owner); err != nil {
-		return err
-	} else if found {
-		return nil
-	}
-
-	path, err := CredentialsPath(owner)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("create config dir: %w", err)
-	}
-	return writeJSON(path, credentialsFile{
-		ClientID:     shared.LegacyClientID,
-		ClientSecret: shared.LegacyClientSecret,
-		RedirectURI:  shared.LegacyRedirectURI,
-		AccountID:    shared.LegacyAccountID,
-	})
 }
 
 func writeJSON(path string, v any) error {

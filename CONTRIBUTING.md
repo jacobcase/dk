@@ -603,17 +603,17 @@ config package splits one flat `Config` across two files on write: shared
 settings to `config.json`, the four app-identity fields to
 `credentials-<environment>.json`. `Save` rewrites both; `SaveEnvironment`
 touches only the pointer, because switching environments must never rewrite the
-credentials of the one being left. Credentials found at the top level of
-`config.json` are read as a fallback for the environment that file names — the
-pre-split layout — and are dropped the first time anything is written.
+credentials of the one being left.
 
-That fallback is keyed on the environment `config.json` currently names, which
-is why `SaveEnvironment` extracts those credentials into that environment's own
-file *before* it moves the pointer. Without the extraction the switch does not
-lose them, it reassigns them: the next read finds the same top-level keys under
-a file now naming the sandbox, and a production client secret is written into
-`credentials-sandbox.json` on the next `dk config set`. Regression tests cover
-the whole sequence.
+Credentials at the top level of `config.json` — the single-file layout that
+predates the split — are **ignored**, and a test pins that. A compatibility
+shim for them existed briefly and was removed rather than repaired: it adopted
+the pair only when `config.json` spelled its environment exactly as the
+canonical name, so a file with no `environment` key, or one saying `prod`,
+silently lost both secrets on read and then had them erased by the next write.
+Reading the keys is the kind of half-support that is worse than none. Ignoring
+them means such a file reports missing credentials and exits 6, which is
+recoverable and says what happened. Do not re-add the fallback.
 ## API schema reference
 
 Field names come from DigiKey's OpenAPI specs and are PascalCase; a lowercase key

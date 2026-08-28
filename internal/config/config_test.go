@@ -356,140 +356,47 @@ func TestSaveEnvironmentLeavesCredentialsAlone(t *testing.T) {
 	}
 }
 
-// A config.json written by the single-file layout still has credentials at the
-// top level. They belong to the environment that file names, and must not be
-// handed to the other one.
-func TestLegacySingleFileCredentialsAreAdoptedByTheirEnvironmentOnly(t *testing.T) {
+// Credentials at the top level of config.json are the pre-split single-file
+// layout, which dk no longer reads. Support was removed rather than repaired:
+// the shim only ever fired for a config.json written before the per-environment
+// split, and its half-working form silently dropped the pair on read and then
+// erased it on the next write. Ignoring the keys outright means such a file
+// reports missing credentials and exits 6 — recoverable, and it says so.
+func TestTopLevelCredentialsInSharedFileAreIgnored(t *testing.T) {
 	dir := withConfigDir(t)
 
-	legacy := `{"client_id":"legacy-id","client_secret":"legacy-secret","environment":"production","account_id":"42"}`
-	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(legacy), 0o600); err != nil {
+	preSplit := `{"client_id":"legacy-id","client_secret":"legacy-secret","environment":"production","account_id":"42","locale":{"currency":"EUR"}}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(preSplit), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.ClientID != "legacy-id" || cfg.ClientSecret != "legacy-secret" {
-		t.Errorf("credentials = %q/%q, want legacy-id/legacy-secret: an existing install lost its login", cfg.ClientID, cfg.ClientSecret)
-	}
-	if cfg.AccountID != "42" {
-		t.Errorf("AccountID = %q, want %q", cfg.AccountID, "42")
-	}
-
-	sbx, err := LoadEnvironment(EnvSandbox)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if sbx.ClientID != "" {
-		t.Errorf("sandbox ClientID = %q, want empty: production credentials must not leak into the sandbox", sbx.ClientID)
-	}
-}
-
-// The sequence a real upgrade takes: a config.json still in the single-file
-// layout, then a switch to the sandbox, then storing sandbox credentials. The
-// production secret must not follow the pointer into the sandbox's file.
-func TestSwitchingEnvironmentDoesNotReassignLegacyCredentials(t *testing.T) {
-	dir := withConfigDir(t)
-
-	legacy := `{"client_id":"prod-id","client_secret":"prod-secret","environment":"production"}`
-	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(legacy), 0o600); err != nil {
-		t.Fatal(err)
+	for _, env := range []string{EnvProduction, EnvSandbox} {
+		cfg, err := LoadEnvironment(env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.AccountID != "" {
+			t.Errorf("%s credentials = %q/%q/%q, want all empty: config.json is not a credentials file",
+				env, cfg.ClientID, cfg.ClientSecret, cfg.AccountID)
+		}
+		// The shared settings in the same file are still read normally.
+		if cfg.Locale.Currency != "EUR" {
+			t.Errorf("%s Locale.Currency = %q, want EUR: ignoring the credential keys must not discard the rest", env, cfg.Locale.Currency)
+		}
 	}
 
+	// And nothing copies them into a credentials file behind the caller's back.
 	if err := SaveEnvironment(EnvSandbox); err != nil {
 		t.Fatal(err)
 	}
-
-	sbx, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if sbx.ClientID != "" || sbx.ClientSecret != "" {
-		t.Errorf("sandbox credentials = %q/%q, want empty: the production pair was reassigned by the switch", sbx.ClientID, sbx.ClientSecret)
-	}
-
-	// Moved to production's own file rather than dropped, so the login that was
-	// working before the switch still works after switching back.
-	prod, err := LoadEnvironment(EnvProduction)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if prod.ClientID != "prod-id" || prod.ClientSecret != "prod-secret" {
-		t.Errorf("production credentials = %q/%q, want prod-id/prod-secret: the switch lost them", prod.ClientID, prod.ClientSecret)
-	}
-
-	// And config.json no longer holds the secret at all.
-	raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(raw), "prod-secret") {
-		t.Errorf("config.json still holds the client secret after the switch:\n%s", raw)
-	}
-}
-
-// An environment that already has a credentials file is the newer truth; the
-// pre-split fields must not overwrite it on a switch.
-func TestExtractingLegacyCredentialsDoesNotOverwriteAnExistingFile(t *testing.T) {
-	dir := withConfigDir(t)
-
-	if err := Save(Config{Environment: EnvProduction, ClientID: "current-id", ClientSecret: "current-secret"}); err != nil {
-		t.Fatal(err)
-	}
-	// Put stale pre-split keys back alongside the file that supersedes them.
-	stale := `{"environment":"production","client_id":"stale-id","client_secret":"stale-secret"}`
-	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(stale), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := SaveEnvironment(EnvSandbox); err != nil {
-		t.Fatal(err)
-	}
-
-	prod, err := LoadEnvironment(EnvProduction)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if prod.ClientID != "current-id" || prod.ClientSecret != "current-secret" {
-		t.Errorf("production credentials = %q/%q, want current-id/current-secret: stale keys overwrote the real file", prod.ClientID, prod.ClientSecret)
-	}
-}
-
-// Writing anything drops the pre-split credential keys from config.json, so the
-// secret does not linger in a second file after the move.
-func TestSaveDropsLegacyCredentialsFromSharedFile(t *testing.T) {
-	dir := withConfigDir(t)
-
-	legacy := `{"client_id":"legacy-id","client_secret":"legacy-secret","environment":"production"}`
-	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(legacy), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := LoadFile()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := Save(cfg); err != nil {
-		t.Fatal(err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(dir, "config.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(data), "legacy-secret") {
-		t.Errorf("config.json still holds the client secret after a write:\n%s", data)
-	}
-
-	// It moved rather than vanished.
-	reloaded, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reloaded.ClientSecret != "legacy-secret" {
-		t.Errorf("ClientSecret = %q, want %q", reloaded.ClientSecret, "legacy-secret")
+	for _, name := range []string{"credentials-production.json", "credentials-sandbox.json"} {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			continue // not written is the expected case; only the contents matter
+		}
+		if strings.Contains(string(data), "legacy-secret") {
+			t.Errorf("%s holds the pre-split secret:\n%s", name, data)
+		}
 	}
 }
 
