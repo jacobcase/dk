@@ -45,6 +45,25 @@ pushing — CI (`.github/workflows/ci.yml`) runs gofmt, `go mod tidy` verificati
 `go vet`, `go test -race -cover`, and golangci-lint on every push and pull
 request. Commit subjects follow Conventional Commits (`feat:`, `fix:`, `docs:`).
 
+**Neither version CI needs is written down twice.** `setup-go` takes
+`go-version-file: go.mod`, and the golangci-lint version is read out of the
+Makefile's `GOLANGCI` line by the step above the linter. Both exist so `make
+lint-full` and CI cannot disagree about what they are running: CI used to lint
+at `latest` against a pinned Makefile, which meant a golangci-lint release
+adding a check could fail CI on code that linted clean locally, and the repair
+was to chase a version nobody had chosen. Bumping either is a one-line edit — in
+`go.mod` or in the Makefile — and the workflow needs no change. The extraction
+step fails loudly if it cannot find the version, because
+`golangci-lint-action` reads an empty `version` as `latest` and would quietly
+restore the drift.
+
+**If a Go bump behaves differently in CI than locally, suspect `setup-go`
+first.** Its v6 changed toolchain selection, so which Go actually runs is
+decided by that action's reading of `go.mod` rather than by whatever is on your
+machine. The pinned actions are on their current majors and all target Node 24;
+GitHub deprecated Node 20 on the runners, and an action left behind is reported
+as a warning on the run long before it stops working.
+
 ## Testing
 
 The `make` targets and what CI runs are under [Development loop](#development-loop) above.
