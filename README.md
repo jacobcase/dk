@@ -35,10 +35,31 @@ make build       # just builds ./bin/dk
 
 ## Setup
 
-### 1. Register an app with DigiKey
+### 1. Pick an environment
 
-Go to <https://developer.digikey.com>, create an organization and a **Production**
-app, then subscribe that app to:
+dk talks to one DigiKey deployment at a time, production or sandbox. Production
+is the default and is what you want unless you are deliberately testing against
+the sandbox, whose data is not real.
+
+```
+dk env                  which environment is active
+```
+
+This comes first because everything below is stored **per environment**. DigiKey
+registers a sandbox app separately from a production one and does not serve
+sandbox data to a production client id, so dk keeps a separate credentials file
+for each. Registering an app for one environment and then storing its
+credentials while the other is active is the setup mistake that produces a
+confusing failure later.
+
+Only setting up production? There is nothing to do here — carry on to step 2.
+To add the sandbox as well, see [Environments](#environments).
+
+### 2. Register an app with DigiKey
+
+Go to <https://developer.digikey.com>, create an organization and an app for the
+environment you picked — **Production** unless you chose the sandbox — then
+subscribe that app to:
 
 - **Product Information** — for `dk search`, `dk product`, `dk categories`, `dk manufacturers`
 - **MyLists** — for `dk list ...`
@@ -52,7 +73,7 @@ https://localhost:8139/digikey_callback
 (You can use a different one and set it with `dk config set redirect_uri <uri>`,
 but DigiKey requires HTTPS — plain `http://localhost` is rejected.)
 
-### 2. Give dk your credentials
+### 3. Give dk your credentials
 
 Either environment variables:
 
@@ -69,11 +90,10 @@ dk config set client_secret <secret>
 ```
 
 `dk config path` prints where the config, credentials, and token files live.
-Credentials belong to one environment — the commands above store them for
-whichever is active, production unless you have switched. See
-[Environments](#environments).
+Both forms above store the pair for whichever environment is active, so if you
+are not certain which that is, run `dk env` before `dk config set`.
 
-### 3. Log in (only needed for lists)
+### 4. Log in (only needed for lists)
 
 Search works immediately. Lists need a one-time browser login:
 
@@ -159,6 +179,12 @@ metadata inline:
 dk list add "Bench PSU rev A" 1276-1000-1-ND --qty 10 --ref C1-C10 --note "input decoupling"
 ```
 
+`--packaging` sets the pack type on the line. It takes MyLists' short codes —
+`CT`, `TR`, `DKR`, `BAG` — not the names `dk search` and `dk pricing` print;
+the two DigiKey APIs spell the same pack types differently. Check it landed with
+`dk list show`, since DigiKey ignores a pack type it does not recognize rather
+than rejecting it.
+
 For per-part metadata in bulk, use `--from-json`:
 
 ```
@@ -202,30 +228,48 @@ result set. So narrowing is a two-step loop.
 **1. Discover what you can filter on:**
 
 ```
-$ dk filters "0603 ceramic capacitor"
+$ dk filters "0.1uF 0603 X7R 50V"
 PARAM ID  PARAMETER                TYPE           VALUES
-2049      Capacitance              UnitOfMeasure  0.1 µF (1500), 1 µF (900), 10 µF (400), (+38 more)
-1291      Tolerance                String         ±10% (2000), ±5% (1200)
-2079      Temperature Coefficient  String         X7R (1800), C0G, NP0 (700)
+2049      Capacitance              UnitOfMeasure  0.1 µF (352)
+3         Tolerance                String         ±5% (74), ±10% (214), ±20% (64)
+14        Voltage - Rated          String         50V (352)
+17        Temperature Coefficient  String         X7R (352)
+252       Operating Temperature    String         -55°C ~ 125°C (321), -55°C ~ 150°C (27), ...
+16        Package / Case           String         0603 (1608 Metric) (351), Radial (1)
 
 Category: Ceramic Capacitors (id 60)
-4210 products match "0603 ceramic capacitor".
+352 products match "0.1uF 0603 X7R 50V".
 ```
 
 The product counts show how much each choice would narrow things.
 
+**Start specific.** DigiKey returns parametric facets only when a search lands
+in a single leaf category, and it is stricter about that than it looks — this is
+the step that surprises people. The narrow query above comes back with sixteen
+parameters; the broader `"0603 ceramic capacitor"` matches 109,344 products and
+comes back with **none at all**. It is not about result size, and a bigger
+`--limit` does not help. If `parameters` is empty, add specifics to the keywords
+or pass a leaf `--category` (`dk categories <id>` walks down to one).
+
 **2. Drill into one parameter** (the overview caps each value list):
 
 ```
-dk filters "0603 ceramic capacitor" --parameter Capacitance
-dk filters "0603 ceramic capacitor" --all-values --output json
+$ dk filters "0.1uF 0603 X7R 50V" --parameter Tolerance
+VALUE ID  VALUE  PRODUCTS  RANGE
+2503      ±5%    74
+1340      ±10%   214
+1900      ±20%   64
 ```
+
+`--parameter` narrows the same result rather than returning a different shape:
+in JSON, `parameters` comes back holding just that one entry with all of its
+values, so `.parameters[0].values` reads either call. `--all-values` does the
+same for every parameter at once.
 
 **3. Apply the filters:**
 
 ```
-dk search "0603 ceramic capacitor" \
-  --param "Capacitance=0.1 µF" --param "Tolerance=±10%" --in-stock
+dk search "0.1uF 0603 X7R 50V" --param "Tolerance=±10%" --in-stock
 ```
 
 Details worth knowing:
@@ -257,11 +301,12 @@ pack can land you a 5000-piece reel. Ask for 4500 and the reel is *cheaper*.
 
 ```
 $ dk pricing 311-10.0KHRCT-ND --qty 4500
-OPTION         ORDER QTY  TOTAL    DKPN               PACKAGING         QTY   UNIT    STOCK    STATUS
-Exact          4500       29.7500  311-10.0KHRCT-ND   Cut Tape (CT)     4500  0.0066  4334182  Active
-Exact          4500       36.9000  311-10.0KHRDKR-ND  Digi-Reel®        4500  0.0082  4334182  Active
-BetterValue *  5000       23.4500  311-10.0KHRTR-ND   Tape & Reel (TR)  5000  0.0047  4333843  Active
+#  OPTION         ORDER QTY  TOTAL    DKPN               PACKAGING         QTY   UNIT    STOCK    STATUS
+1  Exact          4500       29.7500  311-10.0KHRCT-ND   Cut Tape (CT)     4500  0.0066  4244251  Active
+2  Exact          4500       36.9000  311-10.0KHRDKR-ND  Digi-Reel®        4500  0.0082  4244251  Active
+3  BetterValue *  5000       23.4500  311-10.0KHRTR-ND   Tape & Reel (TR)  5000  0.0047  4244251  Active
 
+* hands you more than the 4500 requested.
 Cheapest in stock: 311-10.0KHRTR-ND (Tape & Reel (TR)), order 5000 for 23.4500 USD total.
 Note: this hands you 5000 units, not the 4500 requested.
 ```
@@ -298,6 +343,20 @@ The same physical part has a different DigiKey part number per packaging option
 ```
 dk product 1276-1000-1-ND --variations
 ```
+
+If you assemble by hand, reels are mostly noise — a 1600-piece MOQ for something
+you need twelve of. `--packaging` keeps only the pack types you name:
+
+```
+dk search "ring terminal 10-12 AWG" --packaging Bulk
+dk search "0603 resistor 10k" --packaging CT
+```
+
+The values are the `packaging` facet `dk filters` reports for that query; a full
+name, a short code, or a numeric id all resolve, and the flag is repeatable.
+Note this is a different flag from `dk pricing --packaging`, which filters one
+part's pricing options rather than the catalog and knows only `CT`, `TR`
+and `DKR`.
 
 ## Datasheets and documents
 
@@ -513,7 +572,10 @@ before quoting a figure someone is about to act on.
 
 Entries are keyed by the grant they were read under — a logged-in token returns
 account-specific pricing — so `dk auth login` and `dk auth logout` empty the
-cache rather than risk serving one account's prices to another.
+cache rather than risk serving one account's prices to another. That clear is
+not scoped to the active environment: logging in to the sandbox discards the
+production entries too, so expect the first reads after any login to go to the
+API.
 
 ## For agents
 
