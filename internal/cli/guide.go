@@ -118,11 +118,21 @@ ENVIRONMENT
 SEARCH
   dk search <keywords...> [--limit N] [--offset N] [--in-stock] [--sort price]
                           [--manufacturer NAME|ID] [--category NAME|ID]
-                          [--rohs] [--no-marketplace] [--exact] [--full]
+                          [--packaging NAME|ID] [--rohs] [--no-marketplace]
+                          [--exact] [--full]
 
   Keywords are joined with spaces; quoting is optional.
   --limit is capped at 50 by DigiKey. Page with --offset.
-  --manufacturer and --category accept names, not just numeric ids.
+  --manufacturer, --category and --packaging accept names, not just numeric
+  ids, and each is repeatable ("any of these").
+
+  --packaging keeps only the pack types you name, which is how you exclude
+  reels from a search you intend to hand-assemble:
+      dk search "ring terminal 10-12 AWG" --packaging Bulk
+  The values are the "packaging" facet "dk filters" reports; a short code
+  resolves too, so --packaging TR finds "Tape & Reel (TR)". Note this filters
+  the CATALOG, and is unrelated to "dk pricing --packaging", which filters the
+  pricing options of one part and only knows CT, TR and DKR.
 
   JSON: {"query","total_matches","returned","offset","currency","products":[...]}
   Each product has: digikey_part_number, manufacturer_part_number, manufacturer,
@@ -377,11 +387,13 @@ LISTS
   Two counts on "dk list show" qualify estimated_total, and BOTH have to be
   read before quoting it:
     unmatched_parts  lines DigiKey could not resolve to a product at all
-    unpriced_parts   lines that DID resolve but carry no price — typically a
+    unpriced_parts   lines that DID resolve but whose price does not cover the
+                     whole line. Usually that is no price at all — typically a
                      retired part with zero stock, which DigiKey returns no
                      pack option for. A discontinued part that still HAS stock
                      prices normally and is genuinely buyable.
-  Each such line contributes 0.00, so estimated_total is an UNDERESTIMATE by
+  Each such line contributes 0.00 — or, when only some of its quantities
+  priced, less than it should — so estimated_total is an UNDERESTIMATE by
   however many they are, and a list where every line is unpriced totals 0.00
   while looking complete. Neither count is an error: a BOM can legitimately
   hold a part DigiKey no longer sells. Report them alongside the total rather

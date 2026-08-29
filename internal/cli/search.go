@@ -57,6 +57,7 @@ func newSearchCommand(app *App) *cobra.Command {
 		minQty        int
 		manufacturers []string
 		categories    []string
+		packagings    []string
 		params        []string
 		rohs          bool
 		hasDatasheet  bool
@@ -83,6 +84,16 @@ Keywords are joined with spaces, so quoting is optional:
 The DKPN column is the DigiKey part number to pass to "dk list add". Note that
 each packaging option (cut tape, tape & reel, digi-reel) has its own DKPN; run
 "dk product <part> --variations" to see them all.
+
+--packaging keeps only the pack types you name, which is how you keep reels out
+of results you intend to hand-assemble:
+
+  dk search "ring terminal 10-12 AWG" --packaging Bulk
+  dk search "0603 resistor 10k" --packaging CT --packaging "Cut Tape"
+
+Values are matched the way --manufacturer and --category are, so a short code
+or a numeric id works as well as the full name. Run "dk filters <keywords>" to
+see which pack types a query actually offers.
 
 Parametric filtering uses --param, with names and values as DigiKey spells them:
 
@@ -149,6 +160,18 @@ Uses application-level (2-legged) auth, so no "dk auth login" is needed.`,
 					return err
 				}
 				filters.CategoryFilter = ids
+			}
+
+			if len(packagings) > 0 {
+				categoryHint := ""
+				if len(categories) > 0 {
+					categoryHint = categories[0]
+				}
+				ids, err := resolvePackagingIDs(ctx, client, keywords, categoryHint, inStock, packagings)
+				if err != nil {
+					return err
+				}
+				filters.PackagingFilter = ids
 			}
 
 			if len(params) > 0 {
@@ -268,6 +291,7 @@ Uses application-level (2-legged) auth, so no "dk auth login" is needed.`,
 	f.IntVar(&minQty, "min-qty", 0, "only products with at least this many in stock")
 	f.StringSliceVar(&manufacturers, "manufacturer", nil, "restrict to manufacturers by name or id (repeatable)")
 	f.StringSliceVar(&categories, "category", nil, "restrict to categories by name or id (repeatable)")
+	f.StringSliceVar(&packagings, "packaging", nil, "restrict to pack types by name or id, e.g. Bulk or \"Tape & Reel\" (repeatable)")
 	// StringArray, not StringSlice: values like "1 µF, 10%" contain commas that
 	// must not be split into separate flag values.
 	f.StringArrayVar(&params, "param", nil,
@@ -368,6 +392,35 @@ func resolveCategoryIDs(ctx context.Context, client *digikey.Client, values []st
 				return nil, err
 			}
 			return flattenCategories(tree, nil), nil
+		},
+	})
+}
+
+// resolvePackagingIDs is resolveManufacturerIDs for the packaging facet.
+//
+// There is no endpoint that lists pack types, so the index comes from a
+// discovery search on the same keywords — the values `dk filters` reports under
+// "packaging". That is a second round trip, but an identical one: same
+// keywords, category and --in-stock, so the response cache serves it unless the
+// caller asked for fresh data.
+//
+// Matching is the shared substring rule, which is why "TR" finds
+// "Tape & Reel (TR)" and "Bulk" finds "Bulk" — the pack types a caller knows by
+// their short code and the ones DigiKey only names in full both resolve.
+func resolvePackagingIDs(ctx context.Context, client *digikey.Client, keywords, category string, inStock bool, values []string) ([]digikey.FilterID, error) {
+	return resolveFilterIDs(ctx, values, filterIndex{
+		kind:    "packaging",
+		command: "filters <keywords>",
+		fetch: func(ctx context.Context) ([]digikey.NamedID, error) {
+			facets, _, err := discoverFacets(ctx, client, keywords, category, inStock)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]digikey.NamedID, 0, len(facets.Packaging))
+			for _, f := range facets.Packaging {
+				out = append(out, digikey.NamedID{ID: f.ID, Name: f.Value})
+			}
+			return out, nil
 		},
 	})
 }

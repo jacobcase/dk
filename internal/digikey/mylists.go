@@ -331,13 +331,18 @@ func (p ListPart) OrderablePartNumber() string {
 
 // pricedLines sums the selected pack option across every quantity line.
 //
-// RequestedQty already sums all lines, so the money has to as well: reporting
-// one line's extended price next to every line's quantity would understate the
-// cost of a part that carries more than one line.
-func (p ListPart) pricedLines() (extended float64, quantity int, firstUnit float64, lines int) {
+// quantity counts every line, priced or not. RequestedQty sums them all and
+// UnitPrice has to agree with it: a line DigiKey declined to price still
+// contributes units the caller asked for, and dividing the money by only the
+// priced units reports a figure that does not multiply out. unpriced says
+// whether any line was skipped, which is the only way a caller can tell that
+// extended covers less than the whole part.
+func (p ListPart) pricedLines() (extended float64, quantity int, firstUnit float64, lines int, unpriced bool) {
 	for _, q := range p.Quantities {
+		quantity += q.QuantityRequested
 		opt, ok := q.SelectedPackOption()
 		if !ok {
+			unpriced = true
 			continue
 		}
 		if lines == 0 {
@@ -345,20 +350,27 @@ func (p ListPart) pricedLines() (extended float64, quantity int, firstUnit float
 		}
 		lines++
 		extended += opt.ExtendedPrice
-		quantity += q.QuantityRequested
 	}
-	return extended, quantity, firstUnit, lines
+	return extended, quantity, firstUnit, lines, unpriced
 }
 
 // UnitPrice returns the unit price of the selected pack option, or 0 if DigiKey
 // did not resolve one (e.g. an unmatched part number).
 //
-// With the usual single quantity line this is that line's price. With several,
-// it is the quantity-weighted average, so UnitPrice multiplied by RequestedQty
-// still agrees with ExtendedPrice.
+// It always agrees with the other two figures dk reports for the line:
+// UnitPrice multiplied by RequestedQty equals ExtendedPrice. The single fully
+// priced line — very nearly every line in practice — reports DigiKey's own
+// CalculatedUnitPrice rather than a division that would only reproduce it with
+// less precision. Everything else divides, which covers both several priced
+// lines and the mixed case where one line priced and another came back with no
+// pack options at all: dividing by only the priced units would there report a
+// unit price several times the real one.
 func (p ListPart) UnitPrice() float64 {
-	extended, quantity, firstUnit, lines := p.pricedLines()
-	if lines <= 1 || extended <= 0 || quantity <= 0 {
+	extended, quantity, firstUnit, lines, unpriced := p.pricedLines()
+	if extended <= 0 || quantity <= 0 {
+		return firstUnit
+	}
+	if lines == 1 && !unpriced {
 		return firstUnit
 	}
 	return extended / float64(quantity)
@@ -367,8 +379,21 @@ func (p ListPart) UnitPrice() float64 {
 // ExtendedPrice returns the line total for this part, summed across every
 // quantity line, or 0 if unresolved.
 func (p ListPart) ExtendedPrice() float64 {
-	extended, _, _, _ := p.pricedLines()
+	extended, _, _, _, _ := p.pricedLines()
 	return extended
+}
+
+// HasUnpricedLine reports whether any quantity line came back without a pack
+// option to price it.
+//
+// A part can be partly priced: ExtendedPrice is then a real figure that covers
+// only some of the units, so a caller summing it into a BOM total gets a number
+// that is quietly too low. That is the failure this exists to make visible —
+// `dk list show` counts such a part into unpriced_parts rather than treating a
+// non-zero total as proof the whole line is covered.
+func (p ListPart) HasUnpricedLine() bool {
+	_, _, _, _, unpriced := p.pricedLines()
+	return unpriced
 }
 
 // PartsResponse is the GetPartsByListId result.

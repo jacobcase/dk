@@ -851,3 +851,62 @@ func TestSuggestListNameTrimsBeforeComparing(t *testing.T) {
 			"  Bench PSU  ", got)
 	}
 }
+
+// A part can carry several quantity lines, and DigiKey can price some of them
+// and not others — PackOptions comes back as an empty array for a quantity it
+// will not quote. Summing the money over the priced lines but the quantity over
+// all of them is the only way UnitPrice, RequestedQty and ExtendedPrice keep
+// multiplying out.
+func TestListPartMixingPricedAndUnpricedLinesStaysConsistent(t *testing.T) {
+	index := 0
+	p := ListPart{
+		Quantities: []ListPartQuantity{
+			{
+				QuantityRequested:       10,
+				SelectedPackOptionIndex: &index,
+				PackOptions: []ListPackOption{
+					{PackType: "CT", CalculatedUnitPrice: 0.50, ExtendedPrice: 5.00},
+				},
+			},
+			// DigiKey quoted nothing for this quantity.
+			{QuantityRequested: 30, PackOptions: []ListPackOption{}},
+		},
+	}
+
+	if got, want := p.RequestedQty(), 40; got != want {
+		t.Fatalf("RequestedQty() = %d, want %d", got, want)
+	}
+	if got, want := p.ExtendedPrice(), 5.00; got != want {
+		t.Fatalf("ExtendedPrice() = %v, want %v", got, want)
+	}
+	// The invariant the doc comment promises. Reporting the priced line's own
+	// 0.50 here would claim 40 units cost 20.00 while the total said 5.00.
+	if got := p.UnitPrice() * float64(p.RequestedQty()); got != p.ExtendedPrice() {
+		t.Errorf("UnitPrice()*RequestedQty() = %v, want ExtendedPrice() = %v (UnitPrice was %v)",
+			got, p.ExtendedPrice(), p.UnitPrice())
+	}
+	if !p.HasUnpricedLine() {
+		t.Error("HasUnpricedLine() = false: a part whose total covers 10 of 40 units must not read as fully priced")
+	}
+}
+
+// The overwhelmingly common shape: one line, fully priced. It must keep
+// reporting DigiKey's own figure rather than a division of it.
+func TestListPartSinglePricedLineReportsDigiKeysUnitPrice(t *testing.T) {
+	index := 0
+	p := ListPart{
+		Quantities: []ListPartQuantity{{
+			QuantityRequested:       3,
+			SelectedPackOptionIndex: &index,
+			PackOptions: []ListPackOption{
+				{PackType: "CT", CalculatedUnitPrice: 0.33333, ExtendedPrice: 1.00},
+			},
+		}},
+	}
+	if got, want := p.UnitPrice(), 0.33333; got != want {
+		t.Errorf("UnitPrice() = %v, want DigiKey's %v, not ExtendedPrice/qty", got, want)
+	}
+	if p.HasUnpricedLine() {
+		t.Error("HasUnpricedLine() = true for a fully priced line")
+	}
+}

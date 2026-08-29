@@ -608,3 +608,75 @@ func TestFiltersParameterValuesIsAlwaysAnArray(t *testing.T) {
 		t.Errorf("values = %s, want []", got)
 	}
 }
+
+// The packaging facet is how a caller keeps reels out of a search they intend
+// to hand-assemble. There is no endpoint listing pack types, so the ids come
+// from a discovery search on the same keywords.
+func TestSearchResolvesPackagingNameToID(t *testing.T) {
+	for _, value := range []string{"Cut Tape", "CT", "cut tape (ct)"} {
+		t.Run(value, func(t *testing.T) {
+			m := newMockDigiKey(t)
+			m.handle("POST", "/products/v4/search/keyword", http.StatusOK, facetResponseBody)
+
+			res := run(t, m, "search", "capacitor", "--packaging", value)
+			if res.Code != ExitOK {
+				t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+			}
+
+			// The last keyword call is the search itself; the first was the
+			// facet discovery that resolved the name.
+			var body map[string]any
+			for _, r := range m.requests {
+				if r.Path == "/products/v4/search/keyword" {
+					_ = json.Unmarshal([]byte(r.Body), &body)
+				}
+			}
+			filters, ok := body["FilterOptionsRequest"].(map[string]any)
+			if !ok {
+				t.Fatalf("no FilterOptionsRequest in %v", body)
+			}
+			pkg, ok := filters["PackagingFilter"].([]any)
+			if !ok || len(pkg) != 1 {
+				t.Fatalf("PackagingFilter = %v, want one entry", filters["PackagingFilter"])
+			}
+			if id := pkg[0].(map[string]any)["Id"]; id != "2" {
+				t.Errorf("packaging id = %v, want \"2\" for %q", id, value)
+			}
+		})
+	}
+}
+
+func TestSearchNumericPackagingSkipsDiscovery(t *testing.T) {
+	m := newMockDigiKey(t)
+	m.handle("POST", "/products/v4/search/keyword", http.StatusOK, facetResponseBody)
+
+	res := run(t, m, "search", "capacitor", "--packaging", "3")
+	if res.Code != ExitOK {
+		t.Fatalf("exit code = %d\nstderr: %s", res.Code, res.Stderr)
+	}
+	// A numeric id needs no facet lookup, so the search is the only call.
+	searches := 0
+	for _, r := range m.requests {
+		if r.Path == "/products/v4/search/keyword" {
+			searches++
+		}
+	}
+	if searches != 1 {
+		t.Errorf("made %d keyword calls for a numeric id, want 1", searches)
+	}
+}
+
+func TestSearchUnknownPackagingIsUsageError(t *testing.T) {
+	m := newMockDigiKey(t)
+	m.handle("POST", "/products/v4/search/keyword", http.StatusOK, facetResponseBody)
+
+	res := run(t, m, "search", "capacitor", "--packaging", "Sausage")
+	if res.Code != ExitUsage {
+		t.Fatalf("exit code = %d, want %d\nstderr: %s", res.Code, ExitUsage, res.Stderr)
+	}
+	// Naming the value and where to look is what lets a caller recover without
+	// a second round trip.
+	if !strings.Contains(res.Stderr, "Sausage") || !strings.Contains(res.Stderr, "dk filters") {
+		t.Errorf("error should name the value and point at `dk filters`:\n%s", res.Stderr)
+	}
+}

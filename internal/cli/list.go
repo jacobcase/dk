@@ -104,10 +104,12 @@ type ListDetail struct {
 	// so treat it as a rough figure.
 	EstimatedTotal float64 `json:"estimated_total"`
 	UnmatchedParts int     `json:"unmatched_parts"`
-	// UnpricedParts counts lines that matched a catalog product but carry no
-	// price — typically a pack type DigiKey did not quote at that quantity.
-	// Each contributes 0 to EstimatedTotal, so without this count the total
-	// would understate the real cost with nothing to indicate it.
+	// UnpricedParts counts lines that matched a catalog product but whose price
+	// does not cover the whole line — typically a pack type DigiKey did not
+	// quote at that quantity. Usually that means no price at all; a line with
+	// several requested quantities can also be priced for some and not others.
+	// Either way EstimatedTotal understates the real cost, and without this
+	// count nothing would say so.
 	UnpricedParts int `json:"unpriced_parts"`
 }
 
@@ -715,7 +717,11 @@ func buildListDetail(summary digikey.ListSummary, parts *digikey.PartsResponse, 
 		switch {
 		case !v.Matched:
 			detail.UnmatchedParts++
-		case v.ExtendedPrice <= 0:
+		// A part can be partly priced — one quantity line with pack options and
+		// another with none. ExtendedPrice is then non-zero but covers only some
+		// of the units, so testing it alone would count the part as fully priced
+		// and let the rest disappear from EstimatedTotal unremarked.
+		case v.ExtendedPrice <= 0 || p.HasUnpricedLine():
 			detail.UnpricedParts++
 		}
 	}
