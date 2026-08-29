@@ -14,16 +14,21 @@ import (
 // digikeyEnvVars is every variable applyEnv consults. Keep it in sync with
 // that function: a new variable left out here would let a developer's real
 // credentials leak into these tests and quietly change what they assert.
+//
+// DIGIKEY_ENV is deliberately absent. applyEnv does not read it — the
+// environment is persistent state, not an override — so clearing it would
+// suggest a variable that works. TestLoadIgnoresDigikeyEnvVariable sets it
+// explicitly and pins that it does nothing.
 var digikeyEnvVars = []string{
 	"DIGIKEY_CLIENT_ID",
 	"DIGIKEY_CLIENT_SECRET",
-	"DIGIKEY_ENV",
 	"DIGIKEY_REDIRECT_URI",
 	"DIGIKEY_ACCOUNT_ID",
 	"DIGIKEY_LOCALE_SITE",
 	"DIGIKEY_LOCALE_LANGUAGE",
 	"DIGIKEY_LOCALE_CURRENCY",
 	"DIGIKEY_API_BASE_URL",
+	"DK_CACHE_TTL",
 }
 
 // withConfigDir points config at a temp dir and clears the ambient DigiKey

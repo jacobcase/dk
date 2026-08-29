@@ -414,7 +414,6 @@ func TestAuthStatusReportsLoggedIn(t *testing.T) {
 	t.Setenv("DK_CONFIG_DIR", dir)
 	t.Setenv("DIGIKEY_CLIENT_ID", "test-id")
 	t.Setenv("DIGIKEY_CLIENT_SECRET", "test-secret")
-	t.Setenv("DIGIKEY_ENV", "production")
 	loggedIn(t, dir)
 
 	var stdout, stderr strings.Builder
@@ -443,7 +442,6 @@ func TestAuthLogoutRemovesCachedUserToken(t *testing.T) {
 	t.Setenv("DK_CONFIG_DIR", dir)
 	t.Setenv("DIGIKEY_CLIENT_ID", "test-id")
 	t.Setenv("DIGIKEY_CLIENT_SECRET", "test-secret")
-	t.Setenv("DIGIKEY_ENV", "production")
 	loggedIn(t, dir)
 
 	store := auth.NewStore(filepath.Join(dir, "token.json"))
@@ -474,7 +472,6 @@ func TestAuthLogoutAllClearsAppToken(t *testing.T) {
 	t.Setenv("DK_CONFIG_DIR", dir)
 	t.Setenv("DIGIKEY_CLIENT_ID", "test-id")
 	t.Setenv("DIGIKEY_CLIENT_SECRET", "test-secret")
-	t.Setenv("DIGIKEY_ENV", "production")
 	loggedIn(t, dir)
 
 	store := auth.NewStore(filepath.Join(dir, "token.json"))

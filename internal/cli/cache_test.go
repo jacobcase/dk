@@ -32,7 +32,6 @@ func tryIn(t *testing.T, dir string, m *mockDigiKey, args ...string) result {
 	t.Setenv("DK_CONFIG_DIR", dir)
 	t.Setenv("DIGIKEY_CLIENT_ID", "test-id")
 	t.Setenv("DIGIKEY_CLIENT_SECRET", "test-secret")
-	t.Setenv("DIGIKEY_ENV", "production")
 	if m != nil {
 		t.Setenv("DIGIKEY_API_BASE_URL", m.server.URL)
 	}
